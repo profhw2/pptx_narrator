@@ -54,7 +54,7 @@ The `--scan` step downloads the NLTK `stopwords` and `words` corpora on first us
 
 ## Quick start
 
-The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory. A dictionary (`--dict-file`) is a list of string replacements applied to the text processed in the run: to the notes when translating, to the narration text when synthesizing.
+The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory. A dictionary (`--dict-file`) is a list of string replacements applied to the text processed in the run: to the notes before translation and to the narration text before synthesis.
 
 ### Narration in the language of the notes
 
@@ -78,7 +78,7 @@ pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3
 
 ### Translated narration
 
-Translation is usually done once, while synthesis is repeated, so the two are separate runs, each with its own dictionary:
+Translation is usually done once, while synthesis is repeated while readings are refined, so it is convenient to run them separately, each with its own dictionary:
 
 ```bash
 # 1. Extract the notes (language identified automatically) and collect terms to be translated
@@ -97,7 +97,7 @@ pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de --dict-file re
   --verify --pack --writeback-notes --out lecture_de.pptx
 ```
 
-Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. Giving `--dict-file` together with both `--translate` and `--tts` is an error, because it would be unclear which text the dictionary applies to.
+Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. In a single run with both `--translate` and `--tts`, the dictionaries are applied before translation and again before synthesis. This works, but replacements meant as readings (e.g. `CRISPR,C R I S P R`) then also end up in the translated text and in the written-back notes, and may be altered by the translator.
 
 ### Workspace files
 
@@ -125,7 +125,7 @@ mRNA,メッセンジャーアールエヌエー,
 Gbp,ギガベースペア,unit
 ```
 
-- It is applied to the text processed in the run: with `--translate`, to each note before it is sent to the translator (e.g. `塩基対,Basenpaare` to fix a German term); with `--tts`, to the narration text before synthesis (readings). The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
+- It is applied to the text processed in the run: with `--translate`, to each note before it is sent to the translator (e.g. `塩基対,Basenpaare` to fix a German term); with `--tts`, to the narration text before synthesis (readings); with both, at both points. The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
 - Longer strings are replaced first; alphanumeric strings only match on word boundaries; rows with an empty replacement are ignored.
 - `type` = `unit` marks unit symbols that follow a number (`3 Gbp`). For Japanese narration, built-in rules additionally read SI-prefixed units.
 - `--dict-file` can be given several times (e.g. a shared and a deck-specific file); later files take precedence.
@@ -160,7 +160,7 @@ Keep the marker lines when editing such notes in PowerPoint. When `--extract` fi
 | `--retranslate` | With `--translate`, overwrite existing translations |
 | `--source-lang` | Language of the notes (default: `auto`) |
 | `--target-lang` | Narration language (default: `--source-lang` if given, otherwise `en`) |
-| `--dict-file` | Dictionary of string replacements (repeatable); applied to the notes with `--translate`, to the narration text with `--tts` |
+| `--dict-file` | Dictionary of string replacements (repeatable); applied to the notes before `--translate` and to the narration text before `--tts` |
 | `--letter-map` | JSON letter-reading map |
 | `--engine {gpt_sovits,qwen3}` | TTS engine (default: `gpt_sovits`) |
 | `--ref-wav`, `--ref-text-file` | Reference recording and its transcript (required with `--tts`) |

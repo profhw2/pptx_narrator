@@ -535,8 +535,8 @@ def normalize_units(text, extra_units=None, letter_map=None, lang="ja"):
 #
 # It is applied to the text processed in the run: with --translate, to the notes
 # before translation (e.g. to fix how terms are translated); with --tts, to the
-# narration text before synthesis (e.g. readings). Translation and synthesis are run
-# separately when they need different dictionaries. type 'unit' marks unit symbols
+# narration text before synthesis (e.g. readings); with both, at both points.
+# Translation and synthesis can be run separately to use different dictionaries. type 'unit' marks unit symbols
 # that follow a number. The header row is optional. Files in the v1.x layout
 # (Term,Japanese_Reading,English_Reading,Type) are read using the column of the
 # narration language (ja or en).
@@ -1281,8 +1281,8 @@ def build_parser():
     g_text = parser.add_argument_group("text normalization")
     _add(g_text, "--dict-file", dest="dict_file", action="append", default=None,
          help="Dictionary CSV of string replacements (string,replacement,type), repeatable.\n"
-              "Applied to the notes before --translate, or to the narration text before --tts;\n"
-              "run translation and synthesis separately to use different dictionaries")
+              "Applied to the notes before --translate and to the narration text before --tts\n"
+              "(run them separately to use different dictionaries)")
     _add(g_text, "--letter-map", dest="letter_map",
          help="JSON mapping of letters to readings in the narration language, used for\n"
               "unknown unit symbols (e.g. examples/letter_map_ja.json)")
@@ -1347,9 +1347,6 @@ def main(argv=None):
                      "--extract, --scan, --translate, --tts, --verify, --pack")
     if not os.path.exists(args.pptx):
         parser.error(f"input PPTX not found: {args.pptx}")
-    if args.dict_file and args.translate and args.tts:
-        parser.error("--dict-file would apply to both --translate and --tts; run translation and "
-                     "synthesis separately, each with its own dictionary")
     if args.scan and not args.dict_file:
         parser.error("--scan needs --dict-file (the dictionary new candidates are added to)")
     if args.translate and args.source_lang != "auto" and lang_suffix(args.source_lang) == lang_suffix(args.target_lang):
@@ -1394,8 +1391,8 @@ def main(argv=None):
     model_label = f"qwen3-{args.qwen3_model_size}" if args.engine == "qwen3" else args.model
     lang = args.target_lang
     letter_map_data = load_letter_map(args.letter_map)
-    # With --translate the dictionary rewrites the notes; otherwise the narration text.
-    dictionaries = load_dictionaries(args.dict_file, None if args.translate else lang)
+    # The dictionary rewrites the notes before --translate and the narration text before --tts.
+    dictionaries = load_dictionaries(args.dict_file, lang)
 
     if args.extract:
         step_extract_notes(args.pptx, workspace_dir, req_slides, args.source_lang)

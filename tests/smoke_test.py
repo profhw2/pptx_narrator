@@ -71,6 +71,10 @@ ok(pn.apply_dictionary("mRNA 5 mg", [], "fr") == "mRNA 5 mg", "no dictionary -> 
 T = pn.load_dictionaries([terms_ja_de])
 ok(pn.apply_dictionary("塩基対は3 Gbpで5 mg", T, "ja", builtin_units=False) == "Basenpaareはdrei Gigabasenpaareで5 mg",
    "pre-translation replacement without built-in unit readings")
+both = pn.load_dictionaries([terms_ja_de, readings_de], "de")
+pre = pn.apply_dictionary("塩基対とmRNA", both, "ja", builtin_units=False)
+ok(pre == "BasenpaareとBoten-RNA" and pn.apply_dictionary("Basenpaare und Boten-RNA, 2 kDa", both, "de") == "Basenpaare und Boten-RNA, 2 Kilodalton",
+   "one dictionary applied before translation and again before synthesis")
 
 # ---------------------------------------------------------------- extraction
 prs = Presentation(); layout = prs.slide_layouts[5]
@@ -284,6 +288,5 @@ def expect_error(argv, text):
 expect_error(["--pptx", deck, "--tts", "--engine", "qwen3", "--target-lang", "nl", "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
 expect_error(["--pptx", deck, "--tts", "--target-lang", "de", "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support --target-lang 'de'")
 expect_error(["--pptx", deck, "--translate", "--source-lang", "de", "--target-lang", "de"], "--translate needs")
-expect_error(["--pptx", deck, "--translate", "--tts", "--dict-file", "x.csv", "--ref-wav", "a", "--ref-text-file", "b"], "run translation and synthesis separately")
 expect_error(["--pptx", deck, "--scan"], "--scan needs --dict-file")
 print("ALL TESTS PASSED")
