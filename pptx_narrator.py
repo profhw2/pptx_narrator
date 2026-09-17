@@ -10,6 +10,7 @@ import re
 import unicodedata
 from collections import Counter
 import difflib
+import hashlib
 import sys
 import time
 import shutil
@@ -23,13 +24,12 @@ import json
 import requests
 from pptx import Presentation
 from deep_translator import GoogleTranslator
+from deep_translator.constants import GOOGLE_LANGUAGES_TO_CODES
 from pydub import AudioSegment
 import nltk
 from pydub.effects import compress_dynamic_range, normalize
 
 __version__ = "1.2.0"
-
-DICT_HEADER = ["Term", "Japanese_Reading", "English_Reading", "Type"]
 
 
 def _ensure_nltk_data():
@@ -69,6 +69,7 @@ MODELS_CONFIG = {
 # Workspace file names: Japanese keeps the v1.0 names (slide_N.txt), English keeps
 # slide_N_eng.txt, and every other language uses slide_N_<lang>.txt.
 CJK_LANGS = {"ja", "zh", "yue", "ko"}
+KNOWN_LANGUAGE_CODES = set(GOOGLE_LANGUAGES_TO_CODES.values())
 
 # Languages accepted by the TTS engines (ISO 639-1 base code -> value passed to the engine)
 QWEN3_LANGUAGES = {
@@ -81,7 +82,10 @@ _TEXT_FILE_RE = re.compile(r"^slide_(\d+)(?:_([A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})
 
 
 def normalize_lang(code):
-    """Normalize a language code: 'JA' -> 'ja', 'zh_cn' -> 'zh-CN', 'eng' -> 'en'."""
+    """Normalize a language code to the Google Translate spelling.
+
+    'JA' -> 'ja', 'zh_cn' -> 'zh-CN', 'zh' -> 'zh-CN', 'eng' -> 'en', 'he' -> 'iw'.
+    """
     if code is None:
         return None
     code = code.strip().replace("_", "-")
@@ -90,8 +94,16 @@ def normalize_lang(code):
     if code.lower() == "auto":
         return "auto"
     base, _, region = code.partition("-")
-    base = {"eng": "en", "jpn": "ja"}.get(base.lower(), base.lower())
-    return f"{base}-{region.upper()}" if region else base
+    base = {"eng": "en", "jpn": "ja", "he": "iw", "jv": "jw"}.get(base.lower(), base.lower())
+    if not region:
+        return "zh-CN" if base == "zh" else base
+    return f"{base}-{region.upper() if len(region) == 2 else region.title()}"
+
+
+def is_language_code(value):
+    """True for codes known to Google Translate (plus yue), e.g. 'ja', 'de', 'zh-CN'."""
+    code = normalize_lang(value)
+    return bool(code) and code != "auto" and (code in KNOWN_LANGUAGE_CODES or code == "yue")
 
 
 def base_lang(code):
@@ -179,7 +191,7 @@ def detect_language(text):
     return lang, (len(letters) >= 20 and prob >= 0.9)
 
 
-def detect_note_languages(texts):
+def detect_note_languages(texts, known=None):
     """Identify the language of every note ({slide: text} -> {slide: code}).
 
     Notes that are too short or ambiguous to identify reliably ("Thank you.",
@@ -188,6 +200,7 @@ def detect_note_languages(texts):
     """
     first = {n: detect_language(t) for n, t in texts.items()}
     votes = Counter(lang for lang, confident in first.values() if confident)
+    votes.update((known or {}).values())
     majority = votes.most_common(1)[0][0] if votes else None
     result = {}
     for n, (lang, confident) in first.items():
@@ -223,6 +236,80 @@ def find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=None):
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------
+# Structured notes (translated narration + original note)
+# ------------------------------------------
+# When translated narration is written back into the slide notes, the note is laid out as
+#
+#   === pptx-narrator: narration [en] from [ja] #3f2a9c0d1e ===
+#   <English narration>
+#
+#   === pptx-narrator: source [ja] ===
+#   <original Japanese note>
+#
+# The hash identifies the version of the source note that was translated. --extract
+# recognizes this layout: the source part becomes the note to translate, and the
+# narration part is restored as the existing translation only if the source is unchanged.
+_NARRATION_MARK_RE = re.compile(
+    r"^[ \t]*=+[ \t]*pptx-narrator:[ \t]*narration[ \t]*\[([^\]\n]+)\][ \t]*from[ \t]*\[([^\]\n]+)\]"
+    r"[ \t]*#([0-9a-fA-F]{6,40})([ \t]+spoken)?[ \t]*=+[ \t]*$", re.MULTILINE)
+_SOURCE_MARK_RE = re.compile(
+    r"^[ \t]*=+[ \t]*pptx-narrator:[ \t]*source[ \t]*\[([^\]\n]+)\][ \t]*=+[ \t]*$", re.MULTILINE)
+TRANSLATION_MANIFEST = "translations.json"
+
+
+def text_fingerprint(text):
+    """Short hash of a note, insensitive to line-ending and trailing-space differences."""
+    norm = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n").replace("\v", "\n")
+    norm = "\n".join(line.rstrip() for line in norm.strip().split("\n"))
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+
+def compose_structured_note(narration_lang, narration_text, source_lang, source_text,
+                            fingerprint=None, spoken=False):
+    fingerprint = fingerprint or text_fingerprint(source_text)
+    head = (f"=== pptx-narrator: narration [{narration_lang}] from [{source_lang}] "
+            f"#{fingerprint}{' spoken' if spoken else ''} ===")
+    return (f"{head}\n{narration_text.strip()}\n\n"
+            f"=== pptx-narrator: source [{source_lang}] ===\n{source_text.strip()}")
+
+
+def parse_structured_note(text):
+    """Split a structured note; returns None for ordinary notes."""
+    text = text.replace("\r\n", "\n").replace("\v", "\n")
+    m_src = _SOURCE_MARK_RE.search(text)
+    if not m_src:
+        return None
+    info = {"source_lang": normalize_lang(m_src.group(1)), "source_text": text[m_src.end():].strip(),
+            "narration_lang": None, "narration_text": "", "fingerprint": None, "spoken": False}
+    m_nar = _NARRATION_MARK_RE.search(text, 0, m_src.start())
+    if m_nar:
+        info.update(narration_lang=normalize_lang(m_nar.group(1)),
+                    narration_text=text[m_nar.end():m_src.start()].strip(),
+                    fingerprint=m_nar.group(3).lower(), spoken=bool(m_nar.group(4)))
+    return info
+
+
+def _load_manifest(workspace_dir):
+    path = os.path.join(workspace_dir, TRANSLATION_MANIFEST)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not read {path}: {e}")
+    return {}
+
+
+def record_translation(workspace_dir, slide_num, target_lang, source_lang, source_text):
+    """Remember which version of the source note a translation was made from."""
+    manifest = _load_manifest(workspace_dir)
+    manifest.setdefault(str(slide_num), {})[target_lang] = {
+        "source_lang": source_lang, "source_fingerprint": text_fingerprint(source_text)}
+    with open(os.path.join(workspace_dir, TRANSLATION_MANIFEST), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
+
 
 # ==========================================
 # Helper Functions
@@ -265,13 +352,15 @@ def spell_out_letters(s: str, letter_map: dict = None) -> str:
 # ==========================================
 # Dictionary & Term Scanning Logic
 # ==========================================
-def step_scan_and_update_dict(workspace_dir, dict_file, requested_slides, reading_lang="ja"):
-    logger.info("--- [Option: Scan] Scanning text. Filtering out common English words. ---")
+def step_scan_and_update_dict(workspace_dir, dictionaries, requested_slides, target_lang, dict_dir="."):
+    """Collect candidate terms from the note texts and append them to the dictionaries.
 
-    header, body = load_dictionary(dict_file)
-    existing_terms = {row[0].strip().lower() for row in body if row and row[0].strip()}
+    A note file in language L yields entries for the pair (L, target_lang): with
+    L == target_lang they are reading entries (provisional readings are filled in),
+    otherwise they are translation-glossary entries (replacement left blank for review).
+    """
+    logger.info("--- [Option: Scan] Scanning text for technical terms ---")
 
-    candidates = set()
     _ensure_nltk_data()
     from nltk.corpus import stopwords, words
     stop_words = set(stopwords.words('english'))
@@ -292,7 +381,16 @@ def step_scan_and_update_dict(workspace_dir, dict_file, requested_slides, readin
         r'\d+(?:\.\d+)?\s*(?:%|℃|°C|nm|μm|mm|cm|km|kg|mg|µg|ng|pg|ml|μl|kb|Mb|Gb|bp|kDa|Å)'
         r'|\b(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b'
     )
+
+    candidates = {}  # (source_lang, target_lang) -> set of terms
+    existing = {}
     for p, file_lang in text_paths:
+        pair = (file_lang, target_lang)
+        if pair not in existing:
+            existing[pair] = {t.lower() for t, _, _ in lookup_dictionary(dictionaries, *pair)}
+            candidates[pair] = set()
+        existing_terms = existing[pair]
+
         with open(p, 'r', encoding='utf-8') as f:
             text = f.read()
         # English word lists only help for English words (English notes, or Latin words
@@ -318,68 +416,59 @@ def step_scan_and_update_dict(workspace_dir, dict_file, requested_slides, readin
                     continue
                 if not english_filter and not acronym_like:
                     continue
-            candidates.add(term)
+            candidates[pair].add(term)
             existing_terms.add(term_lower)
 
         for term in bypass_found:
             term_lower = term.lower()
             if term_lower in existing_terms:
                 continue
-            candidates.add(term)
+            candidates[pair].add(term)
             existing_terms.add(term_lower)
-
-    reading_base = base_lang(reading_lang)
-    translator = None
-    if reading_base != "en":
-        try:
-            translator = GoogleTranslator(source='en', target=reading_lang)
-        except Exception as e:
-            logger.warning(f"Translation-based reading guesses are disabled for '{reading_lang}': {e}")
 
     ROMAN_NUMERAL_READINGS = {
         "I": "いち", "II": "に", "III": "さん", "IV": "よん", "V": "ご",
         "VI": "ろく", "VII": "なな", "VIII": "はち", "IX": "きゅう", "X": "じゅう",
     }
+    translators = {}
 
-    new_entries = []
-    for term in sorted(candidates):
-        pron = ""
-        if reading_base == "ja" and term in ROMAN_NUMERAL_READINGS:
-            pron = ROMAN_NUMERAL_READINGS[term]
-        elif re.match(r'^[A-Z]+$', term):
-            pron = " ".join(term)
-        elif re.match(r'^[a-zA-Z]+$', term) and translator is not None:
-            try:
-                guess = translator.translate(term) or ""
-            except Exception:
-                guess = ""
-            if reading_base == "ja":
-                pron = guess if (guess != term and is_japanese(guess)) else ""
-            else:
-                pron = guess if guess.strip().lower() != term.lower() else ""
-        elif reading_base == "ja" and is_japanese(term):
-            pron = term
+    for (src, tgt), terms in candidates.items():
+        if not terms:
+            continue
+        reading_dictionary = lang_suffix(src) == lang_suffix(tgt)
+        tgt_base = base_lang(tgt)
+        new_entries = []
+        for term in sorted(terms):
+            repl = ""
+            if reading_dictionary:
+                if tgt_base == "ja" and term in ROMAN_NUMERAL_READINGS:
+                    repl = ROMAN_NUMERAL_READINGS[term]
+                elif re.match(r'^[A-Z]+$', term):
+                    repl = " ".join(term)
+                elif re.match(r'^[a-zA-Z]+$', term) and tgt_base != "en":
+                    if tgt not in translators:
+                        try:
+                            translators[tgt] = GoogleTranslator(source='en', target=tgt)
+                        except Exception as e:
+                            logger.warning(f"Reading guesses by translation disabled for '{tgt}': {e}")
+                            translators[tgt] = None
+                    if translators[tgt] is not None:
+                        try:
+                            guess = translators[tgt].translate(term) or ""
+                        except Exception:
+                            guess = ""
+                        if tgt_base == "ja":
+                            repl = guess if (guess != term and is_japanese(guess)) else ""
+                        else:
+                            repl = guess if guess.strip().lower() != term.lower() else ""
+                elif tgt_base == "ja" and is_japanese(term):
+                    repl = term
+            new_entries.append((term, repl))
+            logger.info(f"New term [{src}->{tgt}]: {term} -> {repl or '(blank)'}")
 
-        new_entries.append((term, pron))
-        logger.info(f"New technical term found: {term} -> {'(blank)' if not pron else pron}")
-
-    if new_entries:
-        col = column_index(header, reading_column_names(reading_lang))
-        if col is None:
-            header.append(f"Reading_{reading_lang}")
-            col = len(header) - 1
-            logger.info(f"Added column 'Reading_{reading_lang}' to {dict_file}")
-        rows = [list(r) + [""] * (len(header) - len(r)) for r in body]
-        for term, pron in new_entries:
-            row = [""] * len(header)
-            row[0] = term
-            row[col] = pron
-            rows.append(row)
-        with open(dict_file, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-        logger.info(f"Added {len(new_entries)} purely technical terms (readings for '{reading_lang}').")
+        path = append_dictionary_entries(dictionaries, dict_dir, src, tgt, new_entries)
+        kind = "reading" if reading_dictionary else "translation glossary"
+        logger.info(f"Added {len(new_entries)} {kind} entries to {path}")
 
 SI_PREFIXES = {
     "p": "ピコ", "n": "ナノ", "μ": "マイクロ", "µ": "マイクロ", "m": "ミリ",
@@ -441,76 +530,186 @@ def normalize_units(text, extra_units=None, letter_map=None, lang="ja"):
     pattern = r'(\d+(?:\.\d+)?)\s*([A-Za-zμµÅ°%℃]+)(?![A-Za-z0-9_])'
     return re.sub(pattern, _replace, text)
 
-LEGACY_READING_COLUMNS = {"ja": "Japanese_Reading", "en": "English_Reading"}
+# ------------------------------------------
+# Pronunciation / translation dictionaries
+# ------------------------------------------
+# A dictionary file is a CSV whose header names the language pair it maps between,
+# followed by optional columns:
+#
+#     ja,ja,type          <- Japanese text -> Japanese rewrite (reading) entries
+#     Gbp,ギガベースペア,unit
+#
+#     ja,de,type          <- Japanese notes -> German translation glossary
+#     塩基対,Basenpaare,
+#
+# Files in the v1.x layout (Term,Japanese_Reading,English_Reading,Type, or no header)
+# are still read, as the pairs (ja, ja) and (en, en).
 
-def reading_column_names(lang):
-    """Header names (lower case) accepted as the reading column of a language."""
-    base = base_lang(lang)
-    names = [f"reading_{lang.lower()}", f"reading_{base}"]
-    if base in LEGACY_READING_COLUMNS:
-        names.append(LEGACY_READING_COLUMNS[base].lower())
-    return names
+class Dictionaries(dict):
+    """{(source_lang, target_lang): [(term, replacement, type), ...]} plus the file of each pair."""
 
-def column_index(header, names):
-    lowered = [h.strip().lower() for h in header]
-    for name in names:
-        if name in lowered:
-            return lowered.index(name)
-    return None
+    def __init__(self):
+        super().__init__()
+        self.files = {}      # (source, target) -> (path, number of columns) of a new-format file
 
-def load_dictionary(dict_file):
-    """Read the pronunciation dictionary and return (header, rows).
 
-    Files without a header row are read with the v1.0 layout
-    (Term, Japanese_Reading, English_Reading, Type).
-    """
-    if not dict_file or not os.path.exists(dict_file):
-        return list(DICT_HEADER), []
-    with open(dict_file, 'r', encoding='utf-8', newline='') as f:
+def _entries_from_rows(rows, term_col, repl_col, type_col):
+    entries = []
+    for r in rows:
+        if len(r) <= max(term_col, repl_col) or not r[term_col].strip():
+            continue
+        typ = r[type_col].strip().lower() if type_col is not None and len(r) > type_col else ""
+        entries.append((r[term_col].strip(), r[repl_col].strip(), typ))
+    return entries
+
+
+def read_dictionary_file(path):
+    """Parse one dictionary CSV. Returns ({pair: entries}, header columns or None for v1.x files)."""
+    with open(path, 'r', encoding='utf-8', newline='') as f:
         rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
-    if rows and rows[0][0].strip().lower() == DICT_HEADER[0].lower():
-        return [c.strip() for c in rows[0]], rows[1:]
-    return list(DICT_HEADER), rows
+    if not rows:
+        return {}, None
+    head = [c.strip() for c in rows[0]]
+    lower = [h.lower() for h in head]
+    type_col = lower.index("type") if "type" in lower else None
 
-_warned_missing_columns = set()
+    if len(head) >= 2 and is_language_code(head[0]) and is_language_code(head[1]):
+        pair = (normalize_lang(head[0]), normalize_lang(head[1]))
+        return {pair: _entries_from_rows(rows[1:], 0, 1, type_col)}, head
 
-def apply_dictionary(text, dict_file, lang, letter_map=None):
+    # v1.x layout
+    if lower[0] == "term":
+        body = rows[1:]
+        columns = {"ja": lower.index("japanese_reading") if "japanese_reading" in lower else None,
+                   "en": lower.index("english_reading") if "english_reading" in lower else None}
+    else:
+        body, columns, type_col = rows, {"ja": 1, "en": 2}, 3
+    return {(lang, lang): _entries_from_rows(body, 0, col, type_col)
+            for lang, col in columns.items() if col is not None}, None
+
+
+def load_dictionaries(dict_dir=".", dict_files=None):
+    """Load dict.csv / dict_*.csv from dict_dir, then any explicitly given files."""
+    paths = []
+    if dict_dir and os.path.isdir(dict_dir):
+        for name in sorted(os.listdir(dict_dir)):
+            if name == "dict.csv" or (name.startswith("dict_") and name.endswith(".csv")):
+                paths.append(os.path.join(dict_dir, name))
+    for p in dict_files or []:
+        if not os.path.exists(p):
+            logger.warning(f"Dictionary file not found: {p}")
+        elif os.path.abspath(p) not in {os.path.abspath(q) for q in paths}:
+            paths.append(p)
+
+    dictionaries = Dictionaries()
+    for p in paths:
+        try:
+            parsed, head = read_dictionary_file(p)
+        except Exception as e:
+            logger.error(f"Could not read dictionary {p}: {e}")
+            continue
+        for pair, entries in parsed.items():
+            dictionaries.setdefault(pair, []).extend(entries)
+            if head is not None and pair not in dictionaries.files:
+                dictionaries.files[pair] = (p, len(head))
+        kinds = ", ".join(f"{s}->{t} ({len(e)})" for (s, t), e in parsed.items())
+        logger.info(f"Dictionary {p}: {kinds or 'empty'}" + ("  [v1.x layout, read-only]" if head is None else ""))
+    return dictionaries
+
+
+def _same_lang(a, b):
+    return a == b or (base_lang(a) == base_lang(b) and ("-" not in a or "-" not in b))
+
+
+def lookup_dictionary(dictionaries, source_lang, target_lang):
+    entries = []
+    for (src, tgt), items in dictionaries.items():
+        if _same_lang(src, source_lang) and _same_lang(tgt, target_lang):
+            entries.extend(items)
+    return entries
+
+
+def append_dictionary_entries(dictionaries, dict_dir, source_lang, target_lang, new_entries):
+    """Append (term, replacement) rows to the file of the pair; create dict_<src>_<tgt>.csv if needed."""
+    pair = (source_lang, target_lang)
+    path, ncols = dictionaries.files.get(pair, (None, 3))
+    if path is None:
+        path = os.path.join(dict_dir or ".", f"dict_{source_lang}_{target_lang}.csv")
+        is_new = not os.path.exists(path) or os.path.getsize(path) == 0
+        ncols = 3
+    else:
+        is_new = False
+    needs_newline = False
+    if not is_new:
+        with open(path, 'rb') as fb:
+            fb.seek(-1, os.SEEK_END)
+            needs_newline = fb.read(1) not in (b'\n', b'\r')
+    with open(path, 'a', encoding='utf-8', newline='') as f:
+        if needs_newline:
+            f.write('\n')
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow([source_lang, target_lang, "type"])
+        for term, repl in new_entries:
+            writer.writerow([term, repl] + [""] * (ncols - 2))
+    dictionaries.files[pair] = (path, ncols)
+    dictionaries.setdefault(pair, []).extend((t, r, "") for t, r in new_entries)
+    return path
+
+
+def _replace_term(text, term, replacement):
+    if re.match(r'^[a-zA-Z0-9_ \-]+$', term):
+        pattern = rf'(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])'
+        return re.subn(pattern, lambda _m: replacement, text)
+    return text.replace(term, replacement), text.count(term)
+
+
+def apply_dictionary(text, dictionaries, lang, letter_map=None):
+    """Rewrite text in language `lang` into its spoken form using the (lang, lang) entries."""
     text = unicodedata.normalize('NFC', text)
-    dict_units = {}
-    try:
-        header, body = load_dictionary(dict_file)
-        col = column_index(header, reading_column_names(lang))
-        type_col = column_index(header, ["type"])
-        if col is None and body and (dict_file, lang) not in _warned_missing_columns:
-            logger.warning(f"Dictionary '{dict_file}' has no reading column for '{lang}' "
-                           f"(add a 'Reading_{lang}' column); terms are not replaced.")
-            _warned_missing_columns.add((dict_file, lang))
-
-        rows = []
-        if col is not None:
-            for row in body:
-                if len(row) <= col or not row[0].strip():
-                    continue
-                term = unicodedata.normalize('NFC', row[0].strip())
-                target = unicodedata.normalize('NFC', row[col].strip())
-                if not target:
-                    continue
-                if type_col is not None and len(row) > type_col and row[type_col].strip().lower() == "unit":
-                    dict_units[term] = target
-                else:
-                    rows.append((term, target))
-
-        rows.sort(key=lambda x: len(x[0]), reverse=True)
-        for term, target in rows:
-            if re.match(r'^[a-zA-Z0-9_ \-]+$', term):
-                pattern = rf'(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])'
-                text = re.sub(pattern, lambda _m, t=target: t, text)
-            else:
-                text = text.replace(term, target)
-    except Exception as e:
-        logger.error(f"Dictionary error: {e}")
-
+    dict_units, rows = {}, []
+    for term, repl, typ in lookup_dictionary(dictionaries or {}, lang, lang):
+        term = unicodedata.normalize('NFC', term)
+        repl = unicodedata.normalize('NFC', repl)
+        if not repl:
+            continue
+        if typ == "unit":
+            dict_units[term] = repl
+        else:
+            rows.append((term, repl))
+    rows.sort(key=lambda x: len(x[0]), reverse=True)
+    for term, repl in rows:
+        text, _ = _replace_term(text, term, repl)
     return normalize_units(text, dict_units, letter_map=letter_map, lang=lang)
+
+
+def translate_with_glossary(translator, text, entries):
+    """Translate text, forcing glossary terms to the given target-language replacements.
+
+    Glossary terms are replaced by placeholder tokens before translation and restored
+    afterwards. Returns (translation, applied_terms); if the translator altered a
+    placeholder, the line is translated without the glossary and applied_terms is None.
+    """
+    terms = sorted({(unicodedata.normalize('NFC', t), r) for t, r, typ in entries if t and r and typ != "unit"},
+                   key=lambda x: len(x[0]), reverse=True)
+    protected, used = unicodedata.normalize('NFC', text), []
+    for i, (term, repl) in enumerate(terms):
+        token = f"ZQX{i:03d}Q"
+        protected, n = _replace_term(protected, term, f" {token} " if re.match(r'^[a-zA-Z0-9_ \-]+$', term) else token)
+        if n:
+            used.append((i, term, repl))
+    if not used:
+        return translator.translate(text) or "", []
+
+    translated = translator.translate(protected) or ""
+    for i, term, repl in used:
+        d = f"{i:03d}"
+        token_re = re.compile(rf"Z\s*Q\s*X\s*{d[0]}\s*{d[1]}\s*{d[2]}\s*Q", re.IGNORECASE)
+        translated, n = token_re.subn(lambda _m: repl, translated)
+        if n == 0:
+            return translator.translate(text) or "", None
+    translated = re.sub(r"[ \t]{2,}", " ", translated).strip()
+    return translated, [term for _, term, _ in used]
 
 # ==========================================
 # Pipeline Steps
@@ -518,7 +717,7 @@ def apply_dictionary(text, dict_file, lang, letter_map=None):
 def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="auto"):
     logger.info("--- [Option: Extract] Extracting Notes ---")
     prs = Presentation(pptx_path)
-    notes = {}
+    plain, structured = {}, {}
     for slide_num in requested_slides:
         if slide_num > len(prs.slides): continue
         slide = prs.slides[slide_num - 1]
@@ -539,32 +738,64 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
 
         clean_text = raw_text.replace('​', '').replace('‌', '').replace('‍', '')
         txt = re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
-        if txt:
-            notes[slide_num] = txt
-        else:
+        if not txt:
             logger.info(f"Slide #{slide_num} has no notes (skipped)")
+            continue
+        info = parse_structured_note(txt)
+        if info and info["source_text"]:
+            structured[slide_num] = info
+        else:
+            plain[slide_num] = txt
 
     if source_lang == "auto":
-        languages = detect_note_languages(notes)
+        languages = detect_note_languages(plain, known={n: i["source_lang"] for n, i in structured.items()})
     else:
-        languages = {n: source_lang for n in notes}
+        languages = {n: source_lang for n in plain}
 
-    for slide_num, txt in notes.items():
-        lang = languages[slide_num]
-        name = text_filename(slide_num, lang)
+    for slide_num, txt in plain.items():
+        name = text_filename(slide_num, languages[slide_num])
         with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
             f.write(txt)
-        logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {lang}).")
-    if source_lang == "auto" and notes:
-        summary = Counter(languages.values()).most_common()
-        logger.info("Detected note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
+        logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {languages[slide_num]}).")
 
-def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang):
+    for slide_num, info in structured.items():
+        src_lang = info["source_lang"] if source_lang == "auto" else source_lang
+        languages[slide_num] = src_lang
+        src_name = text_filename(slide_num, src_lang)
+        with open(os.path.join(workspace_dir, src_name), "w", encoding="utf-8") as f:
+            f.write(info["source_text"])
+        logger.info(f"Slide #{slide_num}: structured note; source part extracted to {src_name} (language: {src_lang}).")
+
+        narr_lang = info["narration_lang"]
+        if not narr_lang or not info["narration_text"] or info["spoken"] or lang_suffix(narr_lang) == lang_suffix(src_lang):
+            continue
+        tgt_path = os.path.join(workspace_dir, text_filename(slide_num, narr_lang))
+        if info["fingerprint"] == text_fingerprint(info["source_text"]):
+            with open(tgt_path, "w", encoding="utf-8") as f:
+                f.write(info["narration_text"])
+            record_translation(workspace_dir, slide_num, narr_lang, src_lang, info["source_text"])
+            logger.info(f"Slide #{slide_num}: existing {narr_lang} narration restored to {os.path.basename(tgt_path)}.")
+        else:
+            stale_path = os.path.join(workspace_dir, f"slide_{slide_num}{lang_suffix(narr_lang)}.stale.txt")
+            if os.path.exists(tgt_path):
+                os.remove(tgt_path)
+            with open(stale_path, "w", encoding="utf-8") as f:
+                f.write(info["narration_text"])
+            logger.warning(f"Slide #{slide_num}: the source note was edited after the {narr_lang} narration was "
+                           f"translated; it will be translated again by --translate "
+                           f"(previous narration kept in {os.path.basename(stale_path)}).")
+
+    if source_lang == "auto" and languages:
+        summary = Counter(languages.values()).most_common()
+        logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
+
+def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang,
+                         dictionaries=None, overwrite=False):
     logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' ---")
     translators = {}
     for slide_num in requested_slides:
         tgt_p = os.path.join(workspace_dir, text_filename(slide_num, target_lang))
-        if os.path.exists(tgt_p) and os.path.getsize(tgt_p) > 0:
+        if not overwrite and os.path.exists(tgt_p) and os.path.getsize(tgt_p) > 0:
             continue
         src_lang, src_p = find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=target_lang)
         if src_p is None:
@@ -582,22 +813,31 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
                 logger.error(f"Translation {src_lang} -> {target_lang} is not available: {e}")
                 return
         translator = translators[key]
+        glossary = lookup_dictionary(dictionaries or {}, src_lang, target_lang)
 
-        translated_lines = []
+        translated_lines, applied = [], set()
         for line in text.split('\n'):
-            if line.strip():
-                try:
-                    translated_lines.append(translator.translate(line.strip()) or "")
-                except Exception as e:
-                    logger.error(f"Slide {slide_num} translation error: {e}")
-                    translated_lines.append("")
-            else:
+            if not line.strip():
+                translated_lines.append("")
+                continue
+            try:
+                out, terms = translate_with_glossary(translator, line.strip(), glossary)
+                if terms is None:
+                    logger.warning(f"Slide {slide_num}: glossary placeholders were altered by the "
+                                   f"translator; line translated without glossary: {line.strip()[:40]}")
+                else:
+                    applied.update(terms)
+                translated_lines.append(out)
+            except Exception as e:
+                logger.error(f"Slide {slide_num} translation error: {e}")
                 translated_lines.append("")
 
         if any(translated_lines):
-            with open(tgt_p, "w", encoding="utf-8") as out:
-                out.write('\n'.join(translated_lines))
-            logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang}.")
+            with open(tgt_p, "w", encoding="utf-8") as out_f:
+                out_f.write('\n'.join(translated_lines))
+            record_translation(workspace_dir, slide_num, target_lang, src_lang, text)
+            note = f" (glossary: {', '.join(sorted(applied))})" if applied else ""
+            logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang}{note}.")
 
 def step_generate_audio(
     workspace_dir,
@@ -607,7 +847,7 @@ def step_generate_audio(
     ref_text_f,
     ref_lang,
     api_url,
-    dict_file,
+    dictionaries,
     model_label,
     enable_drc=False,
     drc_threshold=-20.0,
@@ -631,7 +871,7 @@ def step_generate_audio(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            spoken_text = apply_dictionary(f.read().strip(), dict_file, lang, letter_map=letter_map)
+            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
 
@@ -731,7 +971,7 @@ def step_generate_audio_qwen3(
     lang,
     ref_wav,
     ref_text_f,
-    dict_file,
+    dictionaries,
     model_label,
     qwen3_model_size,
     qwen3_device,
@@ -776,7 +1016,7 @@ def step_generate_audio_qwen3(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            spoken_text = apply_dictionary(f.read().strip(), dict_file, lang, letter_map=letter_map)
+            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
 
@@ -969,6 +1209,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
                    source_lang="auto", writeback_notes=False, use_spoken_notes=False):
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
     prs = Presentation(original_pptx)
+    manifest = _load_manifest(workspace_dir)
     for i, slide in enumerate(prs.slides):
         s_num = i + 1
         if s_num not in requested_slides:
@@ -976,22 +1217,35 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
 
         if writeback_notes:
             src_lang, src_p = find_source_text(workspace_dir, s_num, source_lang, exclude_lang=lang)
-            if use_spoken_notes:
-                tgt_p = os.path.join(workspace_dir, spoken_filename(s_num, lang, model_label))
-                if src_lang is not None:
-                    src_p = os.path.join(workspace_dir, spoken_filename(s_num, src_lang, model_label))
+            text_p = os.path.join(workspace_dir, text_filename(s_num, lang))
+            spoken_p = os.path.join(workspace_dir, spoken_filename(s_num, lang, model_label))
+            narration = _read_text(spoken_p if use_spoken_notes else text_p)
+            if src_p is not None:
+                original, original_lang = _read_text(src_p), src_lang
             else:
-                tgt_p = os.path.join(workspace_dir, text_filename(s_num, lang))
-            tgt_t = _read_text(tgt_p)
-            src_t = _read_text(src_p)
+                original, original_lang = _read_text(text_p), lang
 
-            if tgt_t or src_t:
-                logger.info(f"Slide #{s_num}: Updating notes...")
-                notes_slide = slide.notes_slide
-                if notes_slide.notes_text_frame is not None:
-                    notes_slide.notes_text_frame.text = f"{tgt_t}\n\n{src_t}" if (tgt_t and src_t) else (tgt_t or src_t)
-                else:
-                    logger.warning(f"Slide #{s_num}: No text frame in notes slide (skipped)")
+            if not narration and not original:
+                continue
+            if narration and original and narration != original:
+                fingerprint = None
+                entry = manifest.get(str(s_num), {}).get(lang)
+                if src_p is not None and entry and entry.get("source_fingerprint"):
+                    fingerprint = entry["source_fingerprint"]
+                    if fingerprint != text_fingerprint(original):
+                        logger.warning(f"Slide #{s_num}: the {lang} narration was translated from an older version "
+                                       f"of the source note (run --translate --retranslate to update it).")
+                note_text = compose_structured_note(lang, narration, original_lang, original,
+                                                    fingerprint=fingerprint, spoken=use_spoken_notes)
+            else:
+                note_text = narration or original
+
+            logger.info(f"Slide #{s_num}: Updating notes...")
+            notes_slide = slide.notes_slide
+            if notes_slide.notes_text_frame is not None:
+                notes_slide.notes_text_frame.text = note_text
+            else:
+                logger.warning(f"Slide #{s_num}: No text frame in notes slide (skipped)")
 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)
@@ -1041,7 +1295,7 @@ PPTX-Narrator: automated narration of PowerPoint presenter notes
 -----------------------------------------------------------------
 [Recommended workflow]
  1. Extract & scan : pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja --extract --scan
- 2. Review         : edit ws/slide_N*.txt and dict.csv by hand
+ 2. Review         : edit ws/slide_N*.txt and the dictionaries (dict_ja_ja.csv) by hand
  3. Synthesize     : pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja \\
                        --tts --verify --ref-wav ref.wav --ref-text-file ref.txt
  4. Pack           : pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja \\
@@ -1083,13 +1337,16 @@ def build_parser():
     g_steps = parser.add_argument_group("pipeline steps (combine as needed; executed in this order)")
     g_steps.add_argument("--extract", action="store_true",
                          help="Extract presenter notes (hidden slides are skipped)")
-    g_steps.add_argument("--scan", action="store_true",
-                         help="Scan notes for acronyms / technical terms / units and append\n"
-                              "new candidates (with provisional readings for --target-lang)\n"
-                              "to the dictionary CSV")
     g_steps.add_argument("--translate", action="store_true",
                          help="Translate the notes from --source-lang into --target-lang\n"
-                              "with Google Translate")
+                              "with Google Translate, applying the <source>,<target> glossary")
+    g_steps.add_argument("--retranslate", action="store_true",
+                         help="With --translate, overwrite existing translations")
+    g_steps.add_argument("--scan", action="store_true",
+                         help="Scan the note texts for acronyms / technical terms / units and\n"
+                              "append new candidates to dict_<note language>_<target-lang>.csv\n"
+                              "(rewrite candidates for target-language text, glossary candidates\n"
+                              "for notes in other languages)")
     g_steps.add_argument("--tts", action="store_true", help="Synthesize narration audio with the selected engine")
     g_steps.add_argument("--verify", action="store_true",
                          help="ASR round-trip check: transcribe the audio with faster-whisper and\n"
@@ -1110,8 +1367,13 @@ def build_parser():
               "(default: --source-lang if given, otherwise en)")
 
     g_text = parser.add_argument_group("text normalization")
-    _add(g_text, "--dict-file", dest="dict_file", default="dict.csv",
-         help="Pronunciation dictionary CSV (default: dict.csv)")
+    _add(g_text, "--dict-dir", dest="dict_dir", default=".",
+         help="Directory holding the dictionaries dict_<source>_<target>.csv (and a v1.x\n"
+              "dict.csv); --scan creates missing files here (default: current directory)")
+    _add(g_text, "--dict-file", dest="dict_file", action="append", default=None,
+         help="Additional dictionary CSV, repeatable. Its header names the language pair:\n"
+              "'ja,ja,type' = rewrites of Japanese text before TTS (readings),\n"
+              "'ja,de,type' = glossary for translating Japanese notes into German")
     _add(g_text, "--letter-map", dest="letter_map",
          help="JSON mapping of letters to readings in the narration language, used for\n"
               "unknown unit symbols (e.g. examples/letter_map_ja.json)")
@@ -1149,8 +1411,9 @@ def build_parser():
 
     g_pack = parser.add_argument_group("packing")
     _add(g_pack, "--writeback-notes", dest="writeback_notes", action="store_true",
-         help="Write the narration text (followed by the source-language text, if any)\n"
-              "back into the slide notes")
+         help="Write the narration back into the slide notes. Translated (or spoken-form)\n"
+              "narration is written first and the original note is kept below it, separated\n"
+              "by '=== pptx-narrator: ... ===' marker lines that --extract recognizes")
     _add(g_pack, "--use-spoken-notes", dest="use_spoken_notes", action="store_true",
          help="With --writeback-notes, write the dictionary-normalized reading text instead")
     return parser
@@ -1169,7 +1432,7 @@ def main(argv=None):
     if args.target_lang == "auto":
         parser.error("--target-lang cannot be 'auto'")
 
-    steps = [args.extract, args.scan, args.translate, args.tts, args.verify, args.pack]
+    steps = [args.extract, args.translate, args.scan, args.tts, args.verify, args.pack]
     if not any(steps):
         parser.error("no pipeline step selected; use at least one of "
                      "--extract, --scan, --translate, --tts, --verify, --pack")
@@ -1217,25 +1480,27 @@ def main(argv=None):
     model_label = f"qwen3-{args.qwen3_model_size}" if args.engine == "qwen3" else args.model
     lang = args.target_lang
     letter_map_data = load_letter_map(args.letter_map)
+    dictionaries = load_dictionaries(args.dict_dir, args.dict_file)
 
     if args.extract:
         step_extract_notes(args.pptx, workspace_dir, req_slides, args.source_lang)
-    if args.scan:
-        step_scan_and_update_dict(workspace_dir, args.dict_file, req_slides, reading_lang=lang)
     if args.translate:
-        step_translate_notes(workspace_dir, req_slides, args.source_lang, lang)
+        step_translate_notes(workspace_dir, req_slides, args.source_lang, lang,
+                             dictionaries=dictionaries, overwrite=args.retranslate)
+    if args.scan:
+        step_scan_and_update_dict(workspace_dir, dictionaries, req_slides, lang, dict_dir=args.dict_dir)
     if args.tts:
         if args.engine == "qwen3":
             step_generate_audio_qwen3(
                 workspace_dir, req_slides, lang, args.ref_wav, args.ref_text_file,
-                args.dict_file, model_label, args.qwen3_model_size, args.qwen3_device,
+                dictionaries, model_label, args.qwen3_model_size, args.qwen3_device,
                 enable_drc=args.enable_drc, drc_threshold=args.drc_threshold, drc_ratio=args.drc_ratio,
                 letter_map=letter_map_data,
             )
         else:
             step_generate_audio(
                 workspace_dir, req_slides, lang, args.ref_wav, args.ref_text_file, args.ref_lang,
-                args.api_url, args.dict_file, model_label,
+                args.api_url, dictionaries, model_label,
                 enable_drc=args.enable_drc, drc_threshold=args.drc_threshold, drc_ratio=args.drc_ratio,
                 letter_map=letter_map_data,
             )
