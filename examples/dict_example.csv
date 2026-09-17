@@ -1,6 +1,6 @@
-Term,Japanese_Reading,English_Reading,Type
-CRISPR-Cas9,クリスパーキャスナイン,crisper cas nine,
-mRNA,メッセンジャーアールエヌエー,messenger R N A,
-Euchromatin,ユークロマチン,,
-Gbp,ギガベースペア,,unit
-kDa,キロダルトン,,unit
+Term,Japanese_Reading,English_Reading,Type,Reading_de
+CRISPR-Cas9,クリスパーキャスナイン,crisper cas nine,,
+mRNA,メッセンジャーアールエヌエー,messenger R N A,,Boten-RNA
+Euchromatin,ユークロマチン,,,
+Gbp,ギガベースペア,gigabase pairs,unit,Gigabasenpaare
+kDa,キロダルトン,kilodaltons,unit,Kilodalton

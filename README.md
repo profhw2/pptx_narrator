@@ -4,32 +4,45 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22812409.svg)](https://doi.org/10.5281/zenodo.22812409)
 
-**PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in a cloned voice, and writes the audio back into the deck. It is designed for technical and scientific lectures that are revised frequently: when a note changes, the corresponding narration is regenerated instead of re-recorded.
+**PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in a cloned voice, optionally in another language, and writes the audio back into the deck. It is designed for technical and scientific lectures that are revised frequently: when a note changes, the corresponding narration is regenerated instead of re-recorded.
 
 ## Features
 
 - **Note extraction** – presenter notes are exported per slide as editable text files; hidden slides are skipped.
-- **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a pronunciation dictionary (CSV) for manual review.
-- **Reading normalization** – dictionary substitution plus rule-based reading of SI-prefixed units (e.g. `5 mg` → 5ミリグラム, `2 kDa` → 2キロダルトン).
-- **Voice cloning** – two interchangeable engines: [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server) and [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process).
-- **ASR round-trip verification** (Japanese) – audio is transcribed with `faster-whisper`, both texts are converted to kana with `pyopenjtalk`, and a kana similarity and character error rate (CER) are reported per slide in `verify_report.<model>.csv`.
+- **Translation** – notes can be translated from any source language into any target language supported by Google Translate (via `deep-translator`).
+- **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a pronunciation dictionary (CSV) with one reading column per language, for manual review.
+- **Reading normalization** – dictionary substitution per narration language, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
+- **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server); the voice of a short reference recording is reused across languages.
+- **ASR round-trip verification** – audio is transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters for other languages); similarity and character error rate (CER) are reported per slide.
 - **PPTX repackaging** – the embedded audio of each slide is replaced and the automatic slide advance time (`advTm`) is set to the audio duration.
-- Optional Japanese→English translation of notes (Google Translate via `deep-translator`).
+
+## Supported languages
+
+| Step | Languages |
+|---|---|
+| `--translate` | Any source/target pair supported by Google Translate |
+| `--tts --engine qwen3` | zh, en, ja, ko, de, fr, ru, pt, es, it |
+| `--tts --engine gpt_sovits` | zh, en, ja, ko, yue (Cantonese) |
+| `--verify` | Japanese: kana-level comparison; other languages: character-level comparison of normalized text (any language recognized by Whisper) |
+| Built-in unit readings | Japanese only (other languages: `unit` entries in the dictionary) |
+
+Languages are given as codes such as `ja`, `en`, `de`, `zh-CN`. `--source-lang auto` (default) guesses the language of each note from its script (kana/kanji → `ja`, Hangul → `ko`, Cyrillic → `ru`, otherwise `en`); specify `--source-lang` explicitly for other languages such as Chinese or German.
 
 ## Requirements
 
 - Python 3.10 or later
 - [FFmpeg](https://ffmpeg.org/) on `PATH` (used by `pydub` to write `.m4a`)
 - One TTS engine:
-  - **GPT-SoVITS**: a local GPT-SoVITS installation with its API server running, e.g. `python api_v2.py -a 127.0.0.1 -p 9880` in the GPT-SoVITS directory; or
   - **Qwen3-TTS**: installed with the `qwen3` extra below. Model weights (`Qwen/Qwen3-TTS-12Hz-{0.6B,1.7B}-Base`) are downloaded from Hugging Face on first use. A CUDA GPU or Apple Silicon (MPS) is strongly recommended.
+  - **GPT-SoVITS**: a local GPT-SoVITS installation with its API server running, e.g. `python api_v2.py -a 127.0.0.1 -p 9880` in the GPT-SoVITS directory.
+- Network access for `--translate` (Google Translate).
 
 ## Installation
 
 ```bash
 git clone https://github.com/profhw2/pptx_narrator.git
 cd pptx_narrator
-pip install -e .            # core pipeline (GPT-SoVITS engine)
+pip install -e .            # core pipeline (GPT-SoVITS engine, translation)
 pip install -e ".[qwen3]"   # + Qwen3-TTS engine
 pip install -e ".[verify]"  # + ASR verification
 pip install -e ".[all]"     # everything
@@ -42,13 +55,15 @@ The `--scan` step downloads the NLTK `stopwords` and `words` corpora on first us
 
 The pipeline is split into steps so that text can be reviewed before synthesis. All intermediate files live in a workspace directory.
 
+### Narration in the language of the notes
+
 ```bash
-# 1. Extract notes and collect candidate technical terms into dict.csv
-pptx-narrator --pptx lecture.pptx --workspace ws --extract --scan
+# 1. Extract notes and collect candidate technical terms (readings for Japanese)
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --extract --scan
 
 # 2. Review by hand: ws/slide_N.txt (notes) and dict.csv (readings)
 
-# 3. Synthesize Japanese narration with a cloned voice and verify it
+# 3. Synthesize with a cloned voice and verify
 pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja \
   --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
   --verify --cer-threshold 0.15
@@ -59,37 +74,56 @@ pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3
   --pack --out lecture_narrated.pptx
 ```
 
-For English narration, use `--translate` (Japanese notes → `slide_N_eng.txt`) or write English notes directly, and pass `--target-lang en`. ASR verification is currently available for Japanese only.
+### Translated narration
+
+```bash
+# Japanese notes -> German narration in the same (cloned) voice
+pptx-narrator --pptx lecture.pptx --workspace ws --source-lang ja --target-lang de \
+  --extract --translate --scan
+# review ws/slide_N_de.txt and the Reading_de column of dict.csv, then:
+pptx-narrator --pptx lecture.pptx --workspace ws --source-lang ja --target-lang de \
+  --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
+  --verify --pack --out lecture_de.pptx
+```
+
+### Workspace files
+
+| File | Content |
+|---|---|
+| `slide_N.txt`, `slide_N_eng.txt`, `slide_N_<lang>.txt` | Note text in Japanese, English, or another language (e.g. `slide_3_de.txt`) |
+| `slide_N<suffix>.<model>.spoken.txt` | Normalized text actually sent to the TTS engine |
+| `slide_N<suffix>.<model>.m4a` | Generated audio |
+| `verify_report<suffix>.<model>.csv` | Verification report |
 
 ### Reference voice
 
-`--ref-wav` is a short, clean recording of the target speaker (a few seconds to about ten seconds) and `--ref-text-file` contains its exact transcript.
+`--ref-wav` is a short, clean recording of the target speaker (a few seconds to about ten seconds) and `--ref-text-file` contains its exact transcript. For GPT-SoVITS, give its language with `--ref-lang` (default `ja`).
 
 ### Requirements for `--pack`
 
-`--pack` *replaces* audio that is already embedded in a slide; it does not insert new audio objects. Prepare the deck once, e.g. by recording a slide show narration in PowerPoint or inserting any audio clip on each slide to be narrated. To have slides advance automatically, set the slide transition to advance *After* a time; that time is overwritten with the length of the generated audio. Slides without embedded audio are reported and left unchanged.
+`--pack` *replaces* audio that is already embedded in a slide; it does not insert new audio objects. Prepare the deck once, e.g. by recording a slide show narration in PowerPoint or inserting any audio clip on each slide to be narrated. To have slides advance automatically, set the slide transition to advance *After* a time; that time is overwritten with the length of the generated audio. Slides without embedded audio are reported and left unchanged. With `--writeback-notes`, the narration text (followed by the source-language text, if different) is written into the notes.
 
 ## Pronunciation dictionary
 
-`dict.csv` has four columns:
+`dict.csv` has a `Term` column, one reading column per narration language and an optional `Type` column:
 
 | Column | Meaning |
 |---|---|
 | `Term` | Text to be replaced (matched case-sensitively; alphanumeric terms only on word boundaries) |
-| `Japanese_Reading` | Replacement used for `--target-lang ja` |
-| `English_Reading` | Replacement used for `--target-lang en` |
+| `Japanese_Reading`, `English_Reading` | Readings for `ja` and `en` (v1.x column names) |
+| `Reading_<lang>` | Reading for any other language, e.g. `Reading_de`, `Reading_zh-CN` |
 | `Type` | Empty for ordinary terms; `unit` for unit symbols that follow a number (e.g. `3 Gbp`) |
 
-Longer terms are applied first; empty readings are ignored. See [`examples/dict_example.csv`](examples/dict_example.csv):
+`--scan` adds the `Reading_<lang>` column for `--target-lang` when it is missing. Longer terms are applied first; empty readings are ignored. Dictionaries from v1.x work unchanged. See [`examples/dict_example.csv`](examples/dict_example.csv):
 
 ```csv
-Term,Japanese_Reading,English_Reading,Type
-CRISPR-Cas9,クリスパーキャスナイン,crisper cas nine,
-mRNA,メッセンジャーアールエヌエー,messenger R N A,
-Gbp,ギガベースペア,,unit
+Term,Japanese_Reading,English_Reading,Type,Reading_de
+CRISPR-Cas9,クリスパーキャスナイン,crisper cas nine,,
+mRNA,メッセンジャーアールエヌエー,messenger R N A,,Boten-RNA
+Gbp,ギガベースペア,gigabase pairs,unit,Gigabasenpaare
 ```
 
-Unit symbols not found in the dictionary or the built-in SI rules can be spelled out letter by letter with `--letter-map examples/letter_map_ja.json`.
+Unit symbols not resolved otherwise can be spelled out letter by letter with a letter map for the narration language, e.g. `--letter-map examples/letter_map_ja.json`.
 
 ## Command-line reference
 
@@ -99,37 +133,46 @@ Unit symbols not found in the dictionary or the built-in SI rules can be spelled
 | `--workspace` | Workspace directory (default: `workspace_<name>_<timestamp>`) |
 | `--slides` | Slide selection, e.g. `1-5`, `1,3,5-` |
 | `--extract` / `--scan` / `--translate` / `--tts` / `--verify` / `--pack` | Pipeline steps, executed in this order |
-| `--target-lang {ja,en}` | Narration language (default: `en`) |
+| `--source-lang` | Language of the notes (default: `auto`) |
+| `--target-lang` | Narration language (default: `--source-lang` if given, otherwise `en`) |
 | `--dict-file` | Dictionary CSV (default: `dict.csv`) |
 | `--letter-map` | JSON letter-reading map |
 | `--engine {gpt_sovits,qwen3}` | TTS engine (default: `gpt_sovits`) |
 | `--ref-wav`, `--ref-text-file` | Reference recording and its transcript (required with `--tts`) |
-| `--ref-lang {ja,en}` | Language of the reference recording, GPT-SoVITS only (default: `ja`) |
+| `--ref-lang` | Language of the reference recording, GPT-SoVITS only (default: `ja`) |
 | `--api-url`, `--model` | GPT-SoVITS server URL and model (`v2ProPlus`, `v4`, `v1_clear`) |
 | `--qwen3-model-size {0.6B,1.7B}`, `--qwen3-device` | Qwen3-TTS model and device (`auto`, `cuda:0`, `mps`, `cpu`) |
 | `--enable-drc`, `--drc-threshold`, `--drc-ratio` | Dynamic range compression of the output |
 | `--asr-model`, `--asr-device` | faster-whisper model size and device |
-| `--verify-threshold` | Flag slides with kana similarity below this value (default: 0.85) |
-| `--cer-threshold` | Also flag slides with kana CER above this value (default: off) |
+| `--verify-threshold` | Flag slides with similarity below this value (default: 0.85) |
+| `--cer-threshold` | Also flag slides with CER above this value (default: off) |
 | `--out` | Output deck for `--pack` (default: `output.pptx`) |
-| `--writeback-notes`, `--use-spoken-notes` | Write edited (or normalized) text back into the notes on `--pack` |
+| `--writeback-notes`, `--use-spoken-notes` | Write narration (or normalized) text back into the notes on `--pack` |
 
-Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_file`, `--verify_threshold`, …) remain accepted.
+Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_file`, `--target_lang`, …) remain accepted.
 
 ### Verification report
 
-`verify_report.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio of the two kana strings, 0–1), `cer` (Levenshtein distance / length of the intended kana), `status` (`OK`, `FLAGGED`, or `ENGLISH` when untranslated Latin text remains), the intended and recognized text, and both kana strings.
+`verify_report<suffix>.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
 
 ## Limitations
 
-- ASR verification supports Japanese only.
-- Kana comparison cannot detect pitch-accent errors, and ASR errors can cause false flags; flagged slides should be checked by listening.
-- Translation relies on the Google Translate web service and requires network access.
+- Kana comparison cannot detect pitch-accent errors, and character comparison cannot detect prosody errors. ASR errors, and numbers or units written differently by the ASR (e.g. "5 mg" vs. "five milligrams"), can cause false flags; flagged slides should be checked by listening.
+- Script-based language detection distinguishes only a few languages; use `--source-lang` for others.
+- Machine translation should be reviewed before synthesis, especially for technical terms.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
+
+## Tests
+
+```bash
+python tests/smoke_test.py
+```
+
+The smoke test mocks the TTS, ASR and translation back-ends, so no models or network access are needed (requires `numpy`, `soundfile` and FFmpeg).
 
 ## Citation
 
-If you use PPTX-Narrator, please cite the archived release [doi:10.5281/zenodo.22812409](https://doi.org/10.5281/zenodo.22812409) (metadata in [`CITATION.cff`](CITATION.cff)).
+If you use PPTX-Narrator, please cite the archived release on Zenodo (see the DOI badge above; metadata in [`CITATION.cff`](CITATION.cff)). The changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

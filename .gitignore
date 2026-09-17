@@ -8,7 +8,7 @@ workspace_*/
 *.m4a
 *.zip
 temp*
-verify_report.*.csv
+verify_report*.csv
 
 # local backups / LaTeX build artifacts
 _backup_*/
