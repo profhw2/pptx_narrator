@@ -1141,8 +1141,12 @@ def _read_text(path):
             return f.read().strip()
     return ""
 
+RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "events": ("events",), "none": ()}
+
+
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
-                   source_lang="auto", writeback_notes=False, use_spoken_notes=False):
+                   source_lang="auto", writeback_notes=False, use_spoken_notes=False,
+                   remove_recorded=("pointer", "events")):
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
     prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
@@ -1194,7 +1198,8 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
             if os.path.exists(m4a_p) and s_num <= len(slide_parts):
                 embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
-                                      slide_w, slide_h, slide_part=slide_parts[s_num - 1])
+                                      slide_w, slide_h, slide_part=slide_parts[s_num - 1],
+                                      remove_recorded=remove_recorded)
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
@@ -1332,7 +1337,48 @@ def _slide_part_paths(pkg_dir):
     return paths
 
 
-def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, slide_h=6858000, slide_part=None):
+# Data recorded while a slide show was presented: the laser-pointer path
+# (p14:laserTraceLst, one time-stamped point per sample) and the media events of the
+# recording (p14:showEvtLst: play, pause, seek, stop). Both are timed against the audio
+# that was recorded with them, so they are meaningless once the audio is replaced.
+_RECORDED_SHOW_DATA = {
+    "pointer": ("<p14:laserTraceLst", "laser-pointer path"),
+    "events": ("<p14:showEvtLst", "recorded playback events"),
+}
+
+
+def remove_recorded_show_data(slide_xml, kinds=("pointer", "events")):
+    """Drop the p:ext elements holding the given kinds of recorded show data.
+
+    Returns (new_xml, [descriptions of what was removed])."""
+    removed = []
+    markers = {_RECORDED_SHOW_DATA[k][0]: _RECORDED_SHOW_DATA[k][1] for k in kinds if k in _RECORDED_SHOW_DATA}
+
+    out, pos = [], 0
+    for m in re.finditer(r'<p:ext\b[^>]*[^/]>', slide_xml):
+        if m.start() < pos:
+            continue
+        end, depth = m.end(), 1
+        for t in re.finditer(r'<p:ext\b[^>]*[^/]>|</p:ext>', slide_xml[m.end():]):
+            depth += 1 if t.group(0).startswith("<p:ext") else -1
+            if depth == 0:
+                end = m.end() + t.end()
+                break
+        element = slide_xml[m.start():end]
+        what = next((w for marker, w in markers.items() if marker in element), None)
+        if what:
+            removed.append(what)
+            out.append(slide_xml[pos:m.start()])
+            pos = end
+    out.append(slide_xml[pos:])
+    slide_xml = "".join(out)
+    if removed:
+        slide_xml = re.sub(r'<p:extLst\s*>\s*</p:extLst>', "", slide_xml)
+    return slide_xml, removed
+
+
+def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, slide_h=6858000, slide_part=None,
+                          remove_recorded=("pointer", "events")):
     """Put the narration audio into slide s_num of an unzipped PPTX package.
 
     Each slide gets its own media file, so slides that shared one audio clip (e.g. copied
@@ -1351,6 +1397,13 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
     if os.path.exists(rels_p):
         with open(rels_p, encoding="utf-8") as f:
             rels_xml = f.read()
+
+    slide_xml, removed = remove_recorded_show_data(slide_xml, remove_recorded)
+    for what in removed:
+        logger.info(f"Slide #{s_num}: removed the {what} of the previous recording.")
+    if "<p:contentPart" in slide_xml:
+        logger.warning(f"Slide #{s_num}: the slide contains ink annotations; they are kept and may no longer "
+                       "match the new narration.")
 
     media_dir = os.path.join(pkg_dir, "ppt", "media")
     os.makedirs(media_dir, exist_ok=True)
@@ -1589,6 +1642,11 @@ def build_parser():
               "by '=== pptx-narrator: ... ===' marker lines that --extract recognizes")
     _add(g_pack, "--use-spoken-notes", dest="use_spoken_notes", action="store_true",
          help="With --writeback-notes, write the dictionary-normalized reading text instead")
+    _add(g_pack, "--remove-recorded", dest="remove_recorded", default="all",
+         choices=["all", "pointer", "events", "none"],
+         help="What to remove from a narrated slide of the data recorded with the previous\n"
+              "slide show (default: all): 'pointer' the laser-pointer path, 'events' the\n"
+              "recorded play/pause/seek events. Their timing belongs to the old audio")
     return parser
 
 
@@ -1689,6 +1747,7 @@ def main(argv=None):
             args.pptx, args.out, workspace_dir, req_slides, lang, model_label,
             source_lang=args.source_lang,
             writeback_notes=args.writeback_notes, use_spoken_notes=args.use_spoken_notes,
+            remove_recorded=RECORDED_CHOICES[args.remove_recorded],
         )
 
 

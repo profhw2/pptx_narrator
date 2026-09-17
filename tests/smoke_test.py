@@ -230,6 +230,13 @@ for item in z_in.infolist():
             timing = pn._NARRATION_TIMING.replace("{spid}", "4")
             data = data.replace(b"</p:spTree>", audio_pic("rId91", "rId92", trim).encode() + b"</p:spTree>")
             data = re.sub(rb"(</p:clrMapOvr>)", lambda mm: mm.group(1) + transition.encode() + timing.encode(), data, count=1)
+            recorded = ('<p:extLst><p:ext uri="{3A86A75C-4F4B-4683-9AE1-C65F6400EC91}"><p14:laserTraceLst ' + P14 + '>'
+                        '<p14:tracePtLst><p14:tracePt t="48796" x="6062662" y="3259137"/></p14:tracePtLst>'
+                        '</p14:laserTraceLst></p:ext><p:ext uri="{E180D4A7-C9FB-4DFB-919C-405C955672EB}">'
+                        '<p14:showEvtLst ' + P14 + '><p14:playEvt time="12722" objId="4"/><p14:seekEvt time="38839" '
+                        'objId="4" seek="10379"/></p14:showEvtLst></p:ext><p:ext uri="{BB962C8B}">'
+                        '<p14:creationId ' + P14 + ' val="1"/></p:ext></p:extLst>')
+            data = data.replace(b"</p:sld>", recorded.encode() + b"</p:sld>")
     z_out.writestr(item, data)
 AudioSegment.silent(duration=300).export(os.path.join(d, "m.m4a"), format="ipod")
 z_out.writestr("ppt/media/media1.m4a", open(os.path.join(d, "m.m4a"), "rb").read())
@@ -264,6 +271,13 @@ ok('<a:audioFile r:link=' in sx[1] and 'isNarration="1"' in sx[1] and "pptx_narr
 ok("pptx_narrator_slide2.m4a" in rx[2] and "pptx_narrator_slide3.m4a" in rx[3] and "NULL" not in rx[3]
    and "ppt/media/media1.m4a" not in names, "copied slides get their own audio; the unused old clip is removed")
 ok("p14:trim" not in sx[2] and "p14:trim" not in sx[3] and sx[2].count("<p:pic>") == 1, "trim of the previous recording removed")
+ok(all("laserTraceLst" not in sx[n] and "showEvtLst" not in sx[n] for n in (2, 3)) and "creationId" in sx[2],
+   "laser-pointer path and recorded playback events removed, other slide extensions kept")
+kept = pn.remove_recorded_show_data(open(os.path.join(d, "recorded.xml"), encoding="utf-8").read()
+                                    if False else '<p:sld><p:extLst><p:ext uri="{x}"><p14:laserTraceLst/></p:ext>'
+                                    '<p:ext uri="{y}"><p14:showEvtLst/></p:ext></p:extLst></p:sld>', ("pointer",))
+ok("laserTraceLst" not in kept[0] and "showEvtLst" in kept[0] and kept[1] == ["laser-pointer path"],
+   "--remove-recorded pointer keeps the recorded playback events")
 ok(len(Presentation(out_deck).slides) == 3, "packed deck opens with python-pptx")
 
 logs.clear()
@@ -345,4 +359,6 @@ expect_error(["--pptx", deck, "--tts", "--engine", "qwen3", "--target-lang", "nl
 expect_error(["--pptx", deck, "--tts", "--target-lang", "de", "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support --target-lang 'de'")
 expect_error(["--pptx", deck, "--translate", "--source-lang", "de", "--target-lang", "de"], "--translate needs")
 expect_error(["--pptx", deck, "--scan"], "--scan needs --dict-file")
+ok(pn.build_parser().parse_args(["--pptx", deck]).remove_recorded == "all"
+   and pn.RECORDED_CHOICES["none"] == (), "--remove-recorded defaults to all")
 print("ALL TESTS PASSED")
