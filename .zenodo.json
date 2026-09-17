@@ -1,0 +1,14 @@
+{
+  "title": "PPTX-Narrator: Automated Slide Narration Pipeline with Technical Term Normalization and ASR Verification",
+  "upload_type": "software",
+  "description": "Open-source Python pipeline that turns PowerPoint presenter notes into voice-cloned narration (GPT-SoVITS or Qwen3-TTS), with technical-term and SI-unit normalization, ASR round-trip verification and automatic PPTX repackaging.",
+  "creators": [
+    {
+      "name": "Watanabe, Hidemi",
+      "affiliation": "Graduate School of Information Science and Technology, Hokkaido University",
+      "orcid": "0000-0002-1892-9067"
+    }
+  ],
+  "license": "mit",
+  "keywords": ["text-to-speech", "voice-cloning", "powerpoint", "education-technology", "speech-synthesis"]
+}

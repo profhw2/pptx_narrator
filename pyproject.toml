@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pptx-narrator"
+version = "1.1.0"
+description = "Automated voice-cloned narration of PowerPoint presenter notes with technical-term normalization and ASR verification"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Hidemi Watanabe", email = "watanabe@ist.hokudai.ac.jp" }]
+keywords = ["text-to-speech", "voice-cloning", "powerpoint", "education-technology", "speech-synthesis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Education",
+]
+dependencies = [
+    "python-pptx>=0.6.21",
+    "deep-translator>=1.11.4",
+    "pydub>=0.25.1",
+    "nltk>=3.8.1",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+qwen3 = ["qwen-tts", "torch>=2.0.0", "numpy>=1.24.0", "soundfile>=0.12.1"]
+verify = ["faster-whisper>=0.10.0", "pyopenjtalk>=0.3.0"]
+all = ["pptx-narrator[qwen3,verify]"]
+
+[project.scripts]
+pptx-narrator = "pptx_narrator:main"
+
+[project.urls]
+Homepage = "https://github.com/profhw2/pptx_narrator"
+Issues = "https://github.com/profhw2/pptx_narrator/issues"
+
+[tool.setuptools]
+py-modules = ["pptx_narrator"]

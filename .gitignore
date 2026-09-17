@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+venv/
+.env
+.DS_Store
+workspace_*/
+*.wav
+*.m4a
+*.zip
+temp*
+verify_report.*.csv
+
+# local backups / LaTeX build artifacts
+_backup_*/
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.spl
+*.egg-info/
+build/
+dist/
+
+# manuscript (kept locally, not published with the software)
+softwarex_paper.*

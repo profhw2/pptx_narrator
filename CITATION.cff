@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "PPTX-Narrator: Automated Slide Narration Pipeline with Technical Term Normalization and ASR Verification"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Watanabe"
+    given-names: "Hidemi"
+    email: "watanabe@ist.hokudai.ac.jp"
+    affiliation: "Graduate School of Information Science and Technology, Hokkaido University"
+    orcid: "https://orcid.org/0000-0002-1892-9067"
+repository-code: "https://github.com/profhw2/pptx_narrator"
+keywords:
+  - text-to-speech
+  - voice-cloning
+  - powerpoint
+  - education-technology
+  - speech-synthesis
+license: MIT
+version: 1.1.0
+date-released: 2026-09-17
