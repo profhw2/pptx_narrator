@@ -2,8 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-<!-- After the v1.1.0 release is archived on Zenodo, add the DOI badge here:
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX) -->
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22812409.svg)](https://doi.org/10.5281/zenodo.22812409)
 
 **PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in a cloned voice, and writes the audio back into the deck. It is designed for technical and scientific lectures that are revised frequently: when a note changes, the corresponding narration is regenerated instead of re-recorded.
 
@@ -130,7 +129,7 @@ Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_
 
 ## Citation
 
-If you use PPTX-Narrator, please cite it using the metadata in [`CITATION.cff`](CITATION.cff).
+If you use PPTX-Narrator, please cite the archived release [doi:10.5281/zenodo.22812409](https://doi.org/10.5281/zenodo.22812409) (metadata in [`CITATION.cff`](CITATION.cff)).
 
 ## License
 
