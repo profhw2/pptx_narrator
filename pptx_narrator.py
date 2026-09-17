@@ -775,6 +775,7 @@ def step_generate_audio(
     with open(ref_text_f, "r", encoding="utf-8") as f:
         ref_txt = f.read().strip()
     tts_url = api_url.rstrip("/") + "/tts"
+    stats = SynthesisStats("gpt_sovits", api_url)
 
     for slide_num in requested_slides:
         txt_p = os.path.join(workspace_dir, text_filename(slide_num, lang))
@@ -800,6 +801,7 @@ def step_generate_audio(
             "media_type": "wav",
         }
 
+        started = time.time()
         try:
             res = requests.post(tts_url, json=payload, timeout=600)
             if res.status_code == 200:
@@ -814,11 +816,37 @@ def step_generate_audio(
                 audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
                              format="ipod")
                 os.remove(wav_p)
-                logger.info(f"Slide {slide_num}: Audio generated successfully.")
+                stats.add(slide_num, time.time() - started, len(audio))
             else:
                 logger.error(f"Slide {slide_num} TTS failed! Server returned [{res.status_code}]: {res.text}")
         except Exception as e:
             logger.error(f"Slide {slide_num} TTS connection error: {e}")
+    stats.report()
+
+class SynthesisStats:
+    """Collects synthesis times so that a run reports its cost (see --tts)."""
+
+    def __init__(self, engine, device):
+        self.engine, self.device = engine, device
+        self.slides = 0
+        self.seconds = 0.0
+        self.audio_seconds = 0.0
+
+    def add(self, slide_num, seconds, audio_ms):
+        self.slides += 1
+        self.seconds += seconds
+        self.audio_seconds += audio_ms / 1000.0
+        logger.info(f"Slide {slide_num}: {audio_ms / 1000.0:.1f} s of audio synthesized in {seconds:.1f} s "
+                    f"({seconds / max(audio_ms / 1000.0, 1e-9):.2f} x audio time).")
+
+    def report(self):
+        if not self.slides:
+            return
+        logger.info(f"Synthesis summary ({self.engine}, {self.device}): {self.slides} slides, "
+                    f"{self.audio_seconds / 60:.1f} min of audio in {self.seconds / 60:.1f} min "
+                    f"({self.audio_seconds / max(self.seconds, 1e-9):.2f} x real time, "
+                    f"{self.seconds / self.slides:.1f} s per slide).")
+
 
 def split_into_chunks(text):
     """Split text into sentences: after 。！？, or after . ! ? followed by whitespace."""
@@ -907,6 +935,7 @@ def step_generate_audio_qwen3(
         ref_txt = f.read().strip()
 
     model = _load_qwen3_model(qwen3_model_size, qwen3_device)
+    stats = SynthesisStats(f"qwen3/{qwen3_model_size}", resolve_torch_device(qwen3_device))
 
     voice_clone_prompt = None
     try:
@@ -936,6 +965,7 @@ def step_generate_audio_qwen3(
             f.write(spoken_text)
 
         chunks = split_into_chunks(spoken_text)
+        started = time.time()
         try:
             wavs = []
             sr = None
@@ -981,9 +1011,10 @@ def step_generate_audio_qwen3(
                          format="ipod")
 
             os.remove(wav_p)
-            logger.info(f"Slide {slide_num}: Audio generated successfully (qwen3, {len(chunks)} chunks).")
+            stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
             logger.error(f"Slide {slide_num} Qwen3-TTS generation error: {e}")
+    stats.report()
 
 _KANA_PUNCT_RE = re.compile(r"[\s、。，．,.!?！？「」『』（）()・…]")
 

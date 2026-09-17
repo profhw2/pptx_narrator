@@ -12,6 +12,7 @@
 - `--verify` for languages other than Japanese (character-level similarity and CER on normalized text).
 - `tests/smoke_test.py` (back-ends mocked).
 
+- `--tts` reports the synthesis time per slide and a summary for the run (slides, audio length, elapsed time, speed relative to real time, engine and device).
 - `--pack` removes the laser-pointer path and the recorded play/pause/seek events of the previous slide show from narrated slides (`--remove-recorded all|pointer|events|none`, default `all`); ink annotations are kept and reported.
 - `--pack` inserts narration into slides that have no audio yet, using the XML structure PowerPoint writes for recorded narration (auto-play, hidden during the show, `isNarration`).
 
