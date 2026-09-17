@@ -223,6 +223,12 @@ ok(pn.parse_structured_note(notes2)["source_lang"] == "en", "write-back for an E
 adv = re.findall(rb'advTm="(\d+)"', zipfile.ZipFile(out_deck).read("ppt/slides/slide1.xml"))
 ok(adv and 1700 < int(adv[0]) < 2000, f"slide timing set to the audio length {adv}")
 
+xml_trim = ('<p14:media r:embed="rId2"><p14:trim st="1200" end="800"/><p14:fade in="500"/><p14:bmkLst><p14:bmk name="a" time="1"/></p14:bmkLst></p14:media>'
+            '<p14:media r:embed="rId9"><p14:trim st="10"/></p14:media>')
+cleared, n_cleared = pn.clear_media_playback_settings(xml_trim, {"rId2"})
+ok(n_cleared == 1 and cleared.startswith('<p14:media r:embed="rId2"/>') and '<p14:trim st="10"/>' in cleared,
+   "trim/fade/bookmarks of the replaced audio removed, other media untouched")
+
 # ---------------------------------------------------------------- structured notes round trip
 note = pn.compose_structured_note("en", "Today we talk about DNA.", "ja", "今日はDNAの話です。")
 info = pn.parse_structured_note(note)

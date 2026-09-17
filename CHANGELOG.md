@@ -22,6 +22,7 @@
 - Term scanning no longer splits words containing accented Latin letters, and ignores ordinary words in non-English notes.
 
 ### Fixed
+- `--pack` removes the trim, fade and bookmark settings of the replaced audio, which would otherwise cut or fade the new narration.
 - Dictionary replacements containing backslashes were interpreted as regex escapes.
 
 ## 1.1.0 – 2026-09-17

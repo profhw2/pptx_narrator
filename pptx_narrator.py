@@ -1111,6 +1111,31 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         logger.info(f"{n_latin} slide(s) contain un-converted Latin-script words and need a listen.")
     logger.info(f"Report saved to: {report_p} (sorted worst-first)")
 
+_P14_MEDIA_RE = re.compile(r'<(p14:media)\b([^>]*?)(/?)>(?:(.*?)</p14:media>)?', re.DOTALL)
+_P14_PLAYBACK_CHILD_RE = re.compile(
+    r'<p14:(?:trim|fade)\b[^>]*/>|<p14:(?:trim|fade)\b[^>]*>.*?</p14:(?:trim|fade)>|<p14:bmkLst\b.*?</p14:bmkLst>|<p14:bmkLst\b[^>]*/>',
+    re.DOTALL)
+
+def clear_media_playback_settings(slide_xml, media_rel_ids):
+    """Remove trim, fade and bookmark settings from the p14:media elements of the given relationships.
+
+    Returns (new_xml, number of media elements changed)."""
+    changed = 0
+
+    def _fix(m):
+        nonlocal changed
+        attrs, self_closing, body = m.group(2), m.group(3), m.group(4) or ""
+        embed = re.search(r'r:embed="([^"]+)"', attrs)
+        if self_closing or not embed or embed.group(1) not in media_rel_ids:
+            return m.group(0)
+        new_body = _P14_PLAYBACK_CHILD_RE.sub("", body)
+        if new_body == body:
+            return m.group(0)
+        changed += 1
+        return f"<p14:media{attrs}/>" if not new_body.strip() else f"<p14:media{attrs}>{new_body}</p14:media>"
+
+    return _P14_MEDIA_RE.sub(_fix, slide_xml), changed
+
 def _read_text(path):
     if path and os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -1184,8 +1209,14 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
                         xml_c = f.read()
                     if not re.search(r'advTm="\d+"', xml_c):
                         logger.warning(f"Slide #{s_num}: no automatic slide timing (advTm) found; display duration left unchanged.")
+                    xml_c = re.sub(r'advTm="\d+"', f'advTm="{dur}"', xml_c)
+                    # The old clip's trim, fade and bookmarks would otherwise cut or fade the new audio
+                    media_ids = {r.get('Id') for r in tree.getroot().findall(rel_ns) if r.get('Target', '') == target}
+                    xml_c, n_cleared = clear_media_playback_settings(xml_c, media_ids)
+                    if n_cleared:
+                        logger.info(f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
                     with open(xml_p, "w", encoding="utf-8") as f:
-                        f.write(re.sub(r'advTm="\d+"', f'advTm="{dur}"', xml_c))
+                        f.write(xml_c)
                     replaced = True
                     logger.info(f"Slide #{s_num}: audio replaced ({dur} ms).")
                     break
