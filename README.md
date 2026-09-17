@@ -54,6 +54,14 @@ The `--scan` step downloads the NLTK `stopwords` and `words` corpora on first us
 
 ## Quick start
 
+To try the tool without preparing a deck, build the sample deck first; its notes contain acronyms, gene names and number-unit expressions in Japanese and English:
+
+```bash
+python examples/make_sample_deck.py sample_lecture.pptx
+```
+
+Any few seconds of clear speech with its exact transcript can serve as the reference voice (`--ref-wav` / `--ref-text-file`).
+
 The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory. A dictionary (`--dict-file`) is a list of string replacements applied to the text processed in the run: to the notes before translation and to the narration text before synthesis.
 
 ### Narration in the language of the notes
