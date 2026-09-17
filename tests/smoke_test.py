@@ -32,8 +32,6 @@ d = tempfile.mkdtemp()
 # ---------------------------------------------------------------- languages
 ok(pn.normalize_lang("ZH_cn") == "zh-CN" and pn.normalize_lang("zh") == "zh-CN" and pn.normalize_lang("eng") == "en"
    and pn.normalize_lang("he") == "iw" and pn.normalize_lang("Auto") == "auto", "normalize_lang")
-ok(pn.is_language_code("ja") and pn.is_language_code("zh-TW") and not pn.is_language_code("DNA") and not pn.is_language_code("Term"),
-   "is_language_code")
 ok(pn.text_filename(3, "ja") == "slide_3.txt" and pn.text_filename(3, "en") == "slide_3_eng.txt" and pn.text_filename(3, "de") == "slide_3_de.txt",
    "text filenames (v1.x names kept for ja/en)")
 ok(pn.audio_filename(1, "ja", "v4") == "slide_1.v4.m4a" and pn.spoken_filename(1, "en", "v4") == "slide_1_eng.v4.spoken.txt",
@@ -51,45 +49,28 @@ ok(pn.split_into_chunks("Hello world. It costs 3.5 mg! Next?") == ["Hello world.
 ok(pn.split_into_chunks("今日は晴れ。明日は雨！") == ["今日は晴れ。", "明日は雨！"], "sentence split (CJK)")
 
 # ---------------------------------------------------------------- dictionaries
-dd = os.path.join(d, "dicts"); os.makedirs(dd)
-write(os.path.join(dd, "dict_ja_ja.csv"), "ja,ja,type\nGbp,ギガベースペア,unit\nDNA,ディーエヌエー,\nCRISPR-Cas9,クリスパーキャスナイン,\n")
-write(os.path.join(dd, "dict_de_de.csv"), "de,de,type\nmRNA,Boten-RNA,\nkDa,Kilodalton,unit\nX1,a\\1b,\n")
-write(os.path.join(dd, "dict_ja_de.csv"), "ja,de\n塩基対,Basenpaare\nCRISPR-Cas9,CRISPR-Cas9-System\n")
-write(os.path.join(dd, "notes.csv"), "ja,en\nignored,because not dict_*.csv\n")
+readings_ja = os.path.join(d, "readings_ja.csv")
+write(readings_ja, "string,replacement,type\nGbp,ギガベースペア,unit\nDNA,ディーエヌエー,\nCRISPR-Cas9,クリスパーキャスナイン,\n")
+readings_de = os.path.join(d, "readings_de.csv")
+write(readings_de, "mRNA,Boten-RNA,\nkDa,Kilodalton,unit\nX1,a\\1b,\n")          # no header
+terms_ja_de = os.path.join(d, "terms_ja_de.csv")
+write(terms_ja_de, "string,replacement\n塩基対,Basenpaare\n3 Gbp,drei Gigabasenpaare\n")
 legacy = os.path.join(d, "legacy_dict.csv")
 write(legacy, "Term,Japanese_Reading,English_Reading,Type\nGbp,ギガベースペア,gigabase pairs,unit\nRNA,アールエヌエー,R N A,\n")
-headerless = os.path.join(d, "headerless.csv")
-write(headerless, "PCR,ピーシーアール,P C R\n")
 
-D = pn.load_dictionaries(dd, [legacy, headerless])
-ok(sorted(D) == [("de", "de"), ("en", "en"), ("ja", "de"), ("ja", "ja")], f"pairs from headers and v1.x files {sorted(D)}")
-ok(D.files[("ja", "ja")][0].endswith("dict_ja_ja.csv") and ("en", "en") not in D.files, "v1.x files are read-only")
-ok(pn.apply_dictionary("DNA 3Gbp 5mg RNA PCR", D, "ja") == "ディーエヌエー 3ギガベースペア 5ミリグラム アールエヌエー ピーシーアール",
-   "ja->ja rewrites + built-in units + v1.x entries")
-ok(pn.apply_dictionary("RNA is 3 Gbp and 5 mg", D, "en") == "R N A is 3 gigabase pairs and 5 mg", "en->en (v1.x English_Reading)")
-ok(pn.apply_dictionary("Die mRNA hat 2 kDa. X1", D, "de") == "Die Boten-RNA hat 2 Kilodalton. a\\1b", "de->de rewrites, literal backslash")
-ok(pn.apply_dictionary("mRNA", D, "fr") == "mRNA", "no dictionary for the language -> unchanged")
-ok(len(pn.lookup_dictionary(D, "ja", "de")) == 2 and pn.apply_dictionary("塩基対", D, "de") == "塩基対",
-   "glossary pairs are not used as readings")
-
-
-class FakeTr:
-    calls = []
-    def __init__(self, source, target, mangle=False):
-        if target == "xx":
-            raise ValueError("unsupported language")
-        self.s, self.t, self.mangle = source, target, mangle
-        FakeTr.calls.append((source, target))
-    def translate(self, text):
-        out = f"[{self.s}->{self.t}] {text}"
-        return out.replace("ZQX000Q", "ZQX 000 q") if not self.mangle else out.replace("ZQX", "Zqx-")
-
-
-out, used = pn.translate_with_glossary(FakeTr("ja", "de"), "CRISPR-Cas9で塩基対を切断する", pn.lookup_dictionary(D, "ja", "de"))
-ok("CRISPR-Cas9-System" in out and "Basenpaare" in out and "ZQX" not in out.upper() and sorted(used) == ["CRISPR-Cas9", "塩基対"],
-   f"glossary applied through placeholders: {out!r}")
-out, used = pn.translate_with_glossary(FakeTr("ja", "de", mangle=True), "塩基対を切断する", pn.lookup_dictionary(D, "ja", "de"))
-ok(used is None and out.endswith("塩基対を切断する"), "mangled placeholder -> line translated without glossary")
+R_ja = pn.load_dictionaries([readings_ja, legacy], "ja")
+ok(pn.apply_dictionary("DNA 3Gbp 5mg RNA", R_ja, "ja") == "ディーエヌエー 3ギガベースペア 5ミリグラム アールエヌエー",
+   "replacements + built-in units + v1.x file (Japanese column)")
+ok(pn.apply_dictionary("RNA is 3 Gbp and 5 mg", pn.load_dictionaries([legacy], "en"), "en") == "R N A is 3 gigabase pairs and 5 mg",
+   "v1.x file, English column")
+ok(pn.load_dictionaries([legacy], "de") == [], "v1.x file has no column for other languages")
+R_de = pn.load_dictionaries([readings_de], "de")
+ok(pn.apply_dictionary("Die mRNA hat 2 kDa. X1", R_de, "de") == "Die Boten-RNA hat 2 Kilodalton. a\\1b", "headerless file, literal backslash")
+ok(len(pn.load_dictionaries([readings_ja, os.path.join(d, "missing.csv")], "ja")) == 3, "missing dictionary file tolerated")
+ok(pn.apply_dictionary("mRNA 5 mg", [], "fr") == "mRNA 5 mg", "no dictionary -> unchanged")
+T = pn.load_dictionaries([terms_ja_de])
+ok(pn.apply_dictionary("塩基対は3 Gbpで5 mg", T, "ja", builtin_units=False) == "Basenpaareはdrei Gigabasenpaareで5 mg",
+   "pre-translation replacement without built-in unit readings")
 
 # ---------------------------------------------------------------- extraction
 prs = Presentation(); layout = prs.slide_layouts[5]
@@ -106,18 +87,29 @@ ok(pn.find_source_text(ws, 1, "auto", exclude_lang="de")[0] == "ja" and pn.find_
    and pn.find_source_text(ws, 2, "auto", exclude_lang="en") == (None, None), "find_source_text")
 
 # ---------------------------------------------------------------- translation
+class FakeTr:
+    calls = []
+    def __init__(self, source, target):
+        if target == "xx":
+            raise ValueError("unsupported language")
+        self.s, self.t = source, target
+    def translate(self, text):
+        FakeTr.calls.append(text)
+        return f"[{self.s}->{self.t}] {text}"
+
 pn.GoogleTranslator = FakeTr
-pn.step_translate_notes(ws, [1, 2, 3], "auto", "de", dictionaries=D)
+pn.step_translate_notes(ws, [1, 2, 3], "auto", "de")
 ok(read(os.path.join(ws, "slide_1_de.txt")).startswith("[ja->de]") and read(os.path.join(ws, "slide_2_de.txt")).startswith("[en->de]")
    and read(os.path.join(ws, "slide_3_de.txt")).startswith("[ko->de]"), "translate ja/en/ko -> de")
 write(os.path.join(ws, "slide_1.txt"), "塩基対の話です。")
-pn.step_translate_notes(ws, [1], "auto", "de", dictionaries=D)
+pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T)
 ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")), "existing translation kept without --retranslate")
-pn.step_translate_notes(ws, [1], "auto", "de", dictionaries=D, overwrite=True)
-ok("Basenpaare" in read(os.path.join(ws, "slide_1_de.txt")), "--retranslate applies the ja,de glossary")
-pn.step_translate_notes(ws2, [2], "de", "ja", dictionaries=D)
+pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T, overwrite=True)
+ok(FakeTr.calls[-1] == "Basenpaareの話です。" and read(os.path.join(ws, "slide_1.txt")) == "塩基対の話です。",
+   "--retranslate: dictionary applied to the note sent to the translator; note file unchanged")
+pn.step_translate_notes(ws2, [2], "de", "ja")
 ok(read(os.path.join(ws2, "slide_2.txt")).startswith("[de->ja]"), "translate de -> ja")
-pn.step_translate_notes(ws2, [2], "de", "xx", dictionaries=D)
+pn.step_translate_notes(ws2, [2], "de", "xx")
 ok(not os.path.exists(os.path.join(ws2, "slide_2_xx.txt")), "unsupported target language handled")
 
 # ---------------------------------------------------------------- scan
@@ -127,18 +119,20 @@ sys.modules["nltk.corpus"] = types.SimpleNamespace(
     words=types.SimpleNamespace(words=lambda: ["today", "talk", "structure", "cell", "slide"]))
 ws3 = os.path.join(d, "ws3"); os.makedirs(ws3)
 write(os.path.join(ws3, "slide_1.txt"), "今日はDNAとPCRとGFPの話です。")
-write(os.path.join(ws3, "slide_1_de.txt"), "Heute zeigen wir, wie CRISPR und mRNA in Zellen wirken, 5 kDa groß.")
-D3 = pn.load_dictionaries(dd, [legacy])
-pn.step_scan_and_update_dict(ws3, D3, [1], "de", dict_dir=dd)
-ja_de = list(csv.reader(open(os.path.join(dd, "dict_ja_de.csv"), encoding="utf-8")))
-de_de = list(csv.reader(open(os.path.join(dd, "dict_de_de.csv"), encoding="utf-8")))
-ok(ja_de[0] == ["ja", "de"] and ["DNA", ""] in ja_de and ["PCR", ""] in ja_de, f"ja notes -> glossary rows appended to dict_ja_de.csv {ja_de[-3:]}")
-ok(["CRISPR", "C R I S P R", ""] in de_de and not any(r[0] == "kDa" for r in de_de[4:]), f"de text -> reading rows, existing terms skipped {de_de[4:]}")
-pn.step_scan_and_update_dict(ws3, D3, [1], "ja", dict_dir=dd)
-ja_ja = list(csv.reader(open(os.path.join(dd, "dict_ja_ja.csv"), encoding="utf-8")))
-ok(["PCR", "P C R", ""] in ja_ja and not any(r[0] == "DNA" for r in ja_ja[4:]), "ja reading rows appended, no duplicates")
-ok(os.path.exists(os.path.join(dd, "dict_de_ja.csv")) and read(os.path.join(dd, "dict_de_ja.csv")).startswith("de,ja,type"),
-   "missing pair file created with header")
+write(os.path.join(ws3, "slide_2.txt"), "CRISPRについて。")
+write(os.path.join(ws3, "slide_2_de.txt"), "Heute zeigen wir, wie CRISPR und mRNA in Zellen wirken, 5 kDa groß.")
+terms_file = os.path.join(d, "new_terms.csv")
+pn.step_scan_and_update_dict(ws3, terms_file, [], [1, 2], "de", for_translation=True)
+rows = list(csv.reader(open(terms_file, encoding="utf-8")))
+ok(rows[0] == ["string", "replacement", "type"] and sorted(r[0] for r in rows[1:]) == ["CRISPR", "DNA", "GFP", "PCR"]
+   and all(r[1] == "" for r in rows[1:]), f"scan before translation: notes scanned, blank replacements {rows[1:]}")
+pn.step_scan_and_update_dict(ws3, readings_de, pn.load_dictionaries([readings_de], "de"), [1, 2], "de")
+rows = list(csv.reader(open(readings_de, encoding="utf-8")))
+added = {r[0]: r[1] for r in rows[3:]}
+ok(added.get("CRISPR") == "C R I S P R" and "kDa" not in added and "DNA" not in added,
+   f"scan for synthesis: only the German narration text is scanned, with readings {added}")
+pn.step_scan_and_update_dict(ws3, readings_ja, pn.load_dictionaries([readings_ja], "ja"), [1], "ja")
+ok(["PCR", "P C R", ""] in list(csv.reader(open(readings_ja, encoding="utf-8"))), "scan of Japanese narration text")
 
 # ---------------------------------------------------------------- synthesis (engines mocked)
 logs = []
@@ -147,9 +141,9 @@ class Capture(pn.logging.Handler):
         logs.append(record.getMessage())
 pn.logger.addHandler(Capture())
 reftxt = os.path.join(d, "ref.txt"); write(reftxt, "x")
-pn.step_generate_audio_qwen3(ws, [1], "nl", "r.wav", reftxt, D, "qwen3-1.7B", "1.7B", "cpu")
+pn.step_generate_audio_qwen3(ws, [1], "nl", "r.wav", reftxt, R_de, "qwen3-1.7B", "1.7B", "cpu")
 ok(any("does not support 'nl'" in m for m in logs), "Qwen3: unsupported language rejected before loading the model")
-pn.step_generate_audio(ws, [1], "de", "r.wav", reftxt, "ja", "http://127.0.0.1:1/", D, "v4")
+pn.step_generate_audio(ws, [1], "de", "r.wav", reftxt, "ja", "http://127.0.0.1:1/", R_de, "v4")
 ok(any("GPT-SoVITS supports only" in m for m in logs), "GPT-SoVITS: unsupported language rejected")
 
 sent = {}
@@ -157,7 +151,7 @@ class Resp:
     status_code = 500
     text = "mock"
 pn.requests = types.SimpleNamespace(post=lambda url, json, timeout: (sent.update(json), Resp())[1], RequestException=Exception)
-pn.step_generate_audio(ws, [3], "ko", "r.wav", reftxt, "ja", "http://x/", D, "v4")
+pn.step_generate_audio(ws, [3], "ko", "r.wav", reftxt, "ja", "http://x/", R_de, "v4")
 ok(sent.get("text_lang") == "ko" and sent.get("prompt_lang") == "ja" and os.path.exists(os.path.join(ws, "slide_3_ko.v4.spoken.txt")),
    "GPT-SoVITS request languages")
 
@@ -169,7 +163,7 @@ class FakeModel:
         seen.setdefault("languages", set()).add(language)
         return [np.zeros(2400, dtype="float32")], 24000
 pn._load_qwen3_model = lambda size, device: FakeModel()
-pn.step_generate_audio_qwen3(ws, [1, 2], "de", "r.wav", reftxt, D, "qwen3-1.7B", "1.7B", "auto")
+pn.step_generate_audio_qwen3(ws, [1, 2], "de", "r.wav", reftxt, R_de, "qwen3-1.7B", "1.7B", "auto")
 ok(seen.get("languages") == {"German"} and os.path.exists(os.path.join(ws, "slide_1_de.qwen3-1.7B.m4a")), "Qwen3 German synthesis")
 
 # ---------------------------------------------------------------- verification (ASR mocked)
@@ -240,7 +234,7 @@ ok(read(os.path.join(ws4, "slide_1.txt")) == "塩基対の話です。" and read
    "re-extraction: source part + restored translation")
 ok(pn._load_manifest(ws4)["1"]["de"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"), "manifest written on restore")
 FakeTr.calls.clear()
-pn.step_translate_notes(ws4, [1], "auto", "de", dictionaries=D)
+pn.step_translate_notes(ws4, [1], "auto", "de", dictionary=T)
 ok(FakeTr.calls == [], "restored translation is not translated again")
 
 # edit the source part inside PowerPoint -> narration is stale
@@ -253,7 +247,7 @@ write(os.path.join(ws5, "slide_1_de.txt"), "old narration in the workspace")
 pn.step_extract_notes(edited, ws5, [1], "auto")
 ok(read(os.path.join(ws5, "slide_1.txt")) == "塩基対とRNAの話です。" and not os.path.exists(os.path.join(ws5, "slide_1_de.txt"))
    and read(os.path.join(ws5, "slide_1_de.stale.txt")).startswith("[ja->de]"), "edited source -> stale narration set aside")
-pn.step_translate_notes(ws5, [1], "auto", "de", dictionaries=D)
+pn.step_translate_notes(ws5, [1], "auto", "de", dictionary=T)
 ok("RNA" in read(os.path.join(ws5, "slide_1_de.txt")), "stale narration is translated again")
 
 # spoken-form narration blocks are not restored as translations
@@ -290,4 +284,6 @@ def expect_error(argv, text):
 expect_error(["--pptx", deck, "--tts", "--engine", "qwen3", "--target-lang", "nl", "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
 expect_error(["--pptx", deck, "--tts", "--target-lang", "de", "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support --target-lang 'de'")
 expect_error(["--pptx", deck, "--translate", "--source-lang", "de", "--target-lang", "de"], "--translate needs")
+expect_error(["--pptx", deck, "--translate", "--tts", "--dict-file", "x.csv", "--ref-wav", "a", "--ref-text-file", "b"], "run translation and synthesis separately")
+expect_error(["--pptx", deck, "--scan"], "--scan needs --dict-file")
 print("ALL TESTS PASSED")

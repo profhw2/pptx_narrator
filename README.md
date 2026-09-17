@@ -9,9 +9,9 @@
 ## Features
 
 - **Note extraction** – presenter notes are exported per slide as editable text files; the language of each note is identified automatically; hidden slides are skipped.
-- **Translation** – notes can be translated into any language supported by Google Translate (via `deep-translator`), with a per-language-pair glossary for technical terms.
-- **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into dictionaries for manual review.
-- **Reading normalization** – per-language rewrite dictionaries, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
+- **Translation** – notes can be translated into any language supported by Google Translate (via `deep-translator`); a dictionary applied to the notes beforehand fixes how technical terms are translated.
+- **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a dictionary for manual review.
+- **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
 - **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server).
 - **ASR round-trip verification** – audio is transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); similarity and character error rate (CER) are reported per slide.
 - **PPTX repackaging** – the embedded audio of each slide is replaced and the automatic slide advance time (`advTm`) is set to the audio duration. Translated narration can be written into the notes above the original note, in a marked layout that later extractions recognize.
@@ -54,18 +54,19 @@ The `--scan` step downloads the NLTK `stopwords` and `words` corpora on first us
 
 ## Quick start
 
-The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory; dictionaries live in the current directory (or `--dict-dir`).
+The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory. A dictionary (`--dict-file`) is a list of string replacements applied to the text processed in the run: to the notes when translating, to the narration text when synthesizing.
 
 ### Narration in the language of the notes
 
 ```bash
-# 1. Extract notes and collect candidate technical terms into dict_ja_ja.csv
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --extract --scan
+# 1. Extract notes and collect candidate technical terms into readings_ja.csv
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja \
+  --extract --scan --dict-file readings_ja.csv
 
-# 2. Review by hand: ws/slide_N.txt (notes) and dict_ja_ja.csv (rewrites)
+# 2. Review by hand: ws/slide_N.txt (notes) and readings_ja.csv (readings)
 
 # 3. Synthesize with a cloned voice and verify
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja \
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --dict-file readings_ja.csv \
   --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
   --verify --cer-threshold 0.15
 
@@ -77,27 +78,33 @@ pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3
 
 ### Translated narration
 
+Translation is usually done once, while synthesis is repeated, so the two are separate runs, each with its own dictionary:
+
 ```bash
-# 1. Extract the (e.g. Japanese) notes; terms found in them go to the glossary dict_ja_de.csv
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de --extract --scan
-# 2. Fill in German translations of technical terms in dict_ja_de.csv, then translate;
-#    scanning the German text adds rewrite candidates to dict_de_de.csv
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de --translate --scan
-# 3. Review ws/slide_N_de.txt and dict_de_de.csv, then synthesize, verify and pack,
-#    writing the German narration above the original note
+# 1. Extract the notes (language identified automatically) and collect terms to be translated
 pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
+  --extract --scan --dict-file terms_ja_de.csv
+# 2. Fill in the German terms in terms_ja_de.csv, then translate
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
+  --translate --dict-file terms_ja_de.csv
+# 3. Review ws/slide_N_de.txt; collect candidate readings from the German text
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
+  --scan --dict-file readings_de.csv
+# 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed),
+#    writing the German narration above the original note
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de --dict-file readings_de.csv \
   --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
   --verify --pack --writeback-notes --out lecture_de.pptx
 ```
 
-Existing translations are not overwritten; use `--retranslate` after changing the glossary.
+Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. Giving `--dict-file` together with both `--translate` and `--tts` is an error, because it would be unclear which text the dictionary applies to.
 
 ### Workspace files
 
 | File | Content |
 |---|---|
 | `slide_N.txt`, `slide_N_eng.txt`, `slide_N_<lang>.txt` | Note text in Japanese, English, or another language (e.g. `slide_3_de.txt`) |
-| `slide_N<suffix>.<model>.spoken.txt` | Rewritten text actually sent to the TTS engine |
+| `slide_N<suffix>.<model>.spoken.txt` | Narration text after dictionary replacement, as sent to the TTS engine |
 | `slide_N<suffix>.<model>.m4a` | Generated audio |
 | `verify_report<suffix>.<model>.csv` | Verification report |
 | `translations.json` | Which version of each source note a translation was made from |
@@ -109,26 +116,22 @@ Existing translations are not overwritten; use `--retranslate` after changing th
 
 ## Dictionaries
 
-Each dictionary is a CSV file for one language pair. The header names the source and target language, optionally followed by a `type` column; each row maps a string in the source language to a string in the target language:
+A dictionary is a CSV file of plain string replacements. The header row is optional:
 
 ```csv
-ja,ja,type
+string,replacement,type
 CRISPR-Cas9,クリスパーキャスナイン,
 mRNA,メッセンジャーアールエヌエー,
 Gbp,ギガベースペア,unit
 ```
 
-```csv
-ja,de,type
-塩基対,Basenpaare,
-```
+- It is applied to the text processed in the run: with `--translate`, to each note before it is sent to the translator (e.g. `塩基対,Basenpaare` to fix a German term); with `--tts`, to the narration text before synthesis (readings). The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
+- Longer strings are replaced first; alphanumeric strings only match on word boundaries; rows with an empty replacement are ignored.
+- `type` = `unit` marks unit symbols that follow a number (`3 Gbp`). For Japanese narration, built-in rules additionally read SI-prefixed units.
+- `--dict-file` can be given several times (e.g. a shared and a deck-specific file); later files take precedence.
+- `--scan` appends new candidates to the first `--dict-file` (created if missing). It scans the narration text in `--target-lang` when it exists, filling in provisional readings; otherwise, or together with `--translate`, it scans the notes to be translated and leaves the replacements blank.
 
-- **Same language (`ja,ja`, `de,de`, …)**: rewrites applied to the narration text right before synthesis, e.g. readings of acronyms and units. `type` = `unit` marks unit symbols that follow a number (`3 Gbp`).
-- **Different languages (`ja,de`, …)**: glossary used by `--translate`. The source terms are replaced by placeholders before machine translation and by the given target strings afterwards. If the translator alters a placeholder, the line is translated without the glossary and a warning is shown.
-
-Dictionaries are loaded from `dict_<source>_<target>.csv` files in `--dict-dir` (default: current directory) and from any files given with `--dict-file` (repeatable); the header, not the file name, determines the pair. `--scan` appends new candidates to the file of the corresponding pair and creates `dict_<source>_<target>.csv` if none exists: terms found in notes of language L go to `L,<target-lang>`. Rewrites are applied longest first; alphanumeric terms only match on word boundaries; rows with an empty target string are ignored. See the files in [`examples/`](examples/) (`--dict-dir examples`).
-
-A v1.x `dict.csv` (`Term,Japanese_Reading,English_Reading,Type`) in `--dict-dir` is still read, as the pairs `ja,ja` and `en,en`, but not modified. Unit symbols not resolved otherwise can be spelled out letter by letter with a letter map for the narration language, e.g. `--letter-map examples/letter_map_ja.json`.
+A v1.x dictionary (`Term,Japanese_Reading,English_Reading,Type`) can still be given with `--dict-file`; the column of the narration language (Japanese or English) is used. See the files in [`examples/`](examples/). Unit symbols not resolved otherwise can be spelled out letter by letter with a letter map for the narration language, e.g. `--letter-map examples/letter_map_ja.json`.
 
 ## Packing and notes write-back
 
@@ -153,12 +156,11 @@ Keep the marker lines when editing such notes in PowerPoint. When `--extract` fi
 | `--pptx` | Input deck (required) |
 | `--workspace` | Workspace directory (default: `workspace_<name>_<timestamp>`) |
 | `--slides` | Slide selection, e.g. `1-5`, `1,3,5-` |
-| `--extract` / `--translate` / `--scan` / `--tts` / `--verify` / `--pack` | Pipeline steps, executed in this order |
+| `--extract` / `--scan` / `--translate` / `--tts` / `--verify` / `--pack` | Pipeline steps, executed in this order |
 | `--retranslate` | With `--translate`, overwrite existing translations |
 | `--source-lang` | Language of the notes (default: `auto`) |
 | `--target-lang` | Narration language (default: `--source-lang` if given, otherwise `en`) |
-| `--dict-dir` | Directory of `dict_<source>_<target>.csv` files (default: `.`) |
-| `--dict-file` | Additional dictionary file (repeatable) |
+| `--dict-file` | Dictionary of string replacements (repeatable); applied to the notes with `--translate`, to the narration text with `--tts` |
 | `--letter-map` | JSON letter-reading map |
 | `--engine {gpt_sovits,qwen3}` | TTS engine (default: `gpt_sovits`) |
 | `--ref-wav`, `--ref-text-file` | Reference recording and its transcript (required with `--tts`) |
@@ -182,7 +184,7 @@ Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_
 
 - Kana comparison cannot detect pitch-accent errors, and character comparison cannot detect prosody errors. ASR errors, and numbers or units written differently by the ASR (e.g. "5 mg" vs. "five milligrams"), can cause false flags; flagged slides should be checked by listening.
 - Automatic language identification can fail for notes mixing several languages or for very short notes in decks without other notes; check the file names after `--extract` or give `--source-lang`.
-- Machine translation should be reviewed before synthesis. Glossary placeholders are usually preserved by the translator, but this is not guaranteed.
+- Machine translation should be reviewed before synthesis; terms replaced before translation can still be altered by the translator.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
 
 ## Tests
