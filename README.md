@@ -112,7 +112,7 @@ Existing translations are not overwritten; use `--retranslate` after changing th
 
 ### Reference voice
 
-`--ref-wav` is a short, clean recording of the target speaker (a few seconds to about ten seconds) and `--ref-text-file` contains its exact transcript. For GPT-SoVITS, give its language with `--ref-lang` (default `ja`).
+`--ref-wav` is a short, clean recording (a few seconds to about ten seconds) and `--ref-text-file` contains its exact transcript; this recording alone defines the voice. It is typically the presenter's own voice, but any voice can be used with the speaker's consent, for example a native speaker's voice for a translated version. Keep reference recordings private. For GPT-SoVITS, give the language of the recording with `--ref-lang` (default `ja`).
 
 ## Dictionaries
 
