@@ -24,6 +24,7 @@ dependencies = [
     "pydub>=0.25.1",
     "nltk>=3.8.1",
     "requests>=2.31.0",
+    "py3langid>=0.3.0",
 ]
 
 [project.optional-dependencies]

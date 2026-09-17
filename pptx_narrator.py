@@ -8,6 +8,7 @@ normalization -> (optional) machine translation -> voice-cloned TTS
 import os
 import re
 import unicodedata
+from collections import Counter
 import difflib
 import sys
 import time
@@ -126,21 +127,75 @@ def gpt_sovits_language(lang):
     return GPT_SOVITS_LANGUAGES.get(base_lang(lang))
 
 
-def detect_script_language(text):
-    """Guess the language of a note from its script (used with --source-lang auto).
+# Language identification of the notes (--source-lang auto)
+_LANGID_TO_GOOGLE = {"he": "iw", "jv": "jw", "yue": "zh-TW", "wuu": "zh-CN"}
+_language_identifier = None
 
-    Kana (or kanji only) -> ja, Hangul -> ko, Cyrillic -> ru, otherwise en.
-    Other languages (e.g. Chinese, German) should be given with --source-lang.
+
+def _get_language_identifier():
+    """py3langid classifier restricted to languages that Google Translate accepts."""
+    global _language_identifier
+    if _language_identifier is None:
+        from py3langid import langid
+        from deep_translator.constants import GOOGLE_LANGUAGES_TO_CODES
+        identifier = langid.LanguageIdentifier.from_modelpath(
+            langid.MODEL_DIR / langid.MODEL_FILE, norm_probs=True)
+        google = set(GOOGLE_LANGUAGES_TO_CODES.values())
+        identifier.set_languages([c for c in set(identifier.nb_classes)
+                                  if _LANGID_TO_GOOGLE.get(c, c) in google or c == "zh"])
+        _language_identifier = identifier
+    return _language_identifier
+
+
+def _chinese_variant(text):
+    """zh-CN if all Han characters exist in GB2312 (simplified), otherwise zh-TW."""
+    han = "".join(re.findall(r'[一-鿿]', text))
+    try:
+        han.encode("gb2312")
+        return "zh-CN"
+    except UnicodeEncodeError:
+        return "zh-TW"
+
+
+def detect_language(text):
+    """Identify the language of one note. Returns (language code, confident)."""
+    letters = re.sub(r'[\W\d_]', '', text)
+    if not letters:
+        return "en", False
+    kana = len(re.findall(r'[぀-ヿ]', letters))
+    hangul = len(re.findall(r'[가-힯ᄀ-ᇿ]', letters))
+    han = len(re.findall(r'[一-鿿]', letters))
+    if kana and (kana + han) >= 0.3 * len(letters):
+        return "ja", True
+    if hangul and (hangul + han) >= 0.3 * len(letters):
+        return "ko", True
+    if han == len(letters):
+        # Kanji/hanzi only: Chinese or a kanji-only Japanese note
+        return _chinese_variant(text), False
+    lang, prob = _get_language_identifier().classify(text)
+    lang = _LANGID_TO_GOOGLE.get(lang, lang)
+    if lang == "zh":
+        lang = _chinese_variant(text)
+    return lang, (len(letters) >= 20 and prob >= 0.9)
+
+
+def detect_note_languages(texts):
+    """Identify the language of every note ({slide: text} -> {slide: code}).
+
+    Notes that are too short or ambiguous to identify reliably ("Thank you.",
+    kanji-only titles, formulas) are assigned the most frequent language among the
+    confidently identified notes of the deck.
     """
-    if re.search(r'[぀-ヿ]', text):
-        return "ja"
-    if re.search(r'[가-힯]', text):
-        return "ko"
-    if re.search(r'[一-鿿]', text):
-        return "ja"
-    if re.search(r'[Ѐ-ӿ]', text):
-        return "ru"
-    return "en"
+    first = {n: detect_language(t) for n, t in texts.items()}
+    votes = Counter(lang for lang, confident in first.values() if confident)
+    majority = votes.most_common(1)[0][0] if votes else None
+    result = {}
+    for n, (lang, confident) in first.items():
+        if not confident and majority and lang != majority:
+            logger.info(f"Slide #{n}: short/ambiguous note ('{lang}'); using the deck language '{majority}'")
+            lang = majority
+        result[n] = lang
+    return result
 
 
 def find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=None):
@@ -463,6 +518,7 @@ def apply_dictionary(text, dict_file, lang, letter_map=None):
 def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="auto"):
     logger.info("--- [Option: Extract] Extracting Notes ---")
     prs = Presentation(pptx_path)
+    notes = {}
     for slide_num in requested_slides:
         if slide_num > len(prs.slides): continue
         slide = prs.slides[slide_num - 1]
@@ -481,19 +537,27 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                         text_list.append(text)
             raw_text = "\n".join(text_list).strip()
 
-        if not raw_text:
-            logger.info(f"Slide #{slide_num} has no notes (skipped)")
-            continue
-
         clean_text = raw_text.replace('​', '').replace('‌', '').replace('‍', '')
         txt = re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
-
         if txt:
-            lang = detect_script_language(txt) if source_lang == "auto" else source_lang
-            name = text_filename(slide_num, lang)
-            with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
-                f.write(txt)
-            logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {lang}).")
+            notes[slide_num] = txt
+        else:
+            logger.info(f"Slide #{slide_num} has no notes (skipped)")
+
+    if source_lang == "auto":
+        languages = detect_note_languages(notes)
+    else:
+        languages = {n: source_lang for n in notes}
+
+    for slide_num, txt in notes.items():
+        lang = languages[slide_num]
+        name = text_filename(slide_num, lang)
+        with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
+            f.write(txt)
+        logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {lang}).")
+    if source_lang == "auto" and notes:
+        summary = Counter(languages.values()).most_common()
+        logger.info("Detected note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
 
 def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang):
     logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' ---")
@@ -982,8 +1046,8 @@ PPTX-Narrator: automated narration of PowerPoint presenter notes
                        --tts --verify --ref-wav ref.wav --ref-text-file ref.txt
  4. Pack           : pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja \\
                        --pack --out narrated.pptx
-[Translated narration] e.g. Japanese notes -> German speech:
-    pptx-narrator --pptx deck.pptx --workspace ws --source-lang ja --target-lang de \\
+[Translated narration] e.g. notes in any language -> German speech:
+    pptx-narrator --pptx deck.pptx --workspace ws --target-lang de \\
       --extract --translate --tts --engine qwen3 --ref-wav ref.wav --ref-text-file ref.txt
 Options are written with hyphens; the underscore spellings of v1.0
 (e.g. --dict_file, --verify_threshold) are still accepted.
@@ -1037,7 +1101,7 @@ def build_parser():
     g_lang = parser.add_argument_group("languages")
     _add(g_lang, "--source-lang", dest="source_lang", type=normalize_lang, default="auto",
          help="Language of the presenter notes, e.g. ja, en, zh-CN, de (default: auto =\n"
-              "guess from the script: kana/kanji -> ja, Hangul -> ko, Cyrillic -> ru, else en)")
+              "identified per note from its text; short notes take the deck's main language)")
     _add(g_lang, "--target-lang", dest="target_lang", type=normalize_lang, default=None,
          help="Narration language. Any Google Translate language for --translate;\n"
               "for --tts it must be supported by the engine:\n"

@@ -15,7 +15,10 @@ ok(pn.text_filename(3, "ja") == "slide_3.txt" and pn.text_filename(3, "en") == "
 ok(pn.audio_filename(1, "ja", "v4") == "slide_1.v4.m4a" and pn.spoken_filename(1, "en", "v4") == "slide_1_eng.v4.spoken.txt", "audio/spoken legacy names")
 ok(pn.qwen3_language("de") == "German" and pn.qwen3_language("zh-TW") == "Chinese" and pn.qwen3_language("nl") is None, "qwen3 languages")
 ok(pn.gpt_sovits_language("yue") == "yue" and pn.gpt_sovits_language("de") is None, "gpt-sovits languages")
-ok([pn.detect_script_language(t) for t in ["今日はDNA", "안녕하세요", "Привет", "Hallo Welt"]] == ["ja", "ko", "ru", "en"], "script detection")
+ok([pn.detect_language(t)[0] for t in ["今日はDNAの話です", "안녕하세요 여러분", "На этом слайде показаны результаты.", "Heute sprechen wir über die mRNA und ihre Rolle.", "这张幻灯片显示了实验结果。", "這張投影片顯示了實驗結果。"]] == ["ja", "ko", "ru", "de", "zh-CN", "zh-TW"], "language identification")
+deck_langs = pn.detect_note_languages({1: "Willkommen zur heutigen Vorlesung über Genomeditierung.", 2: "Fragen?", 3: "Vielen Dank.", 4: "Hier vergleichen wir die Effizienz von drei Methoden in Zellen."})
+ok(set(deck_langs.values()) == {"de"}, f"short notes follow deck language {deck_langs}")
+ok(pn.detect_note_languages({1: "本日はゲノム編集について説明します。", 2: "結論"}) == {1: "ja", 2: "ja"}, "kanji-only note in Japanese deck")
 ok(pn.split_into_chunks("Hello world. It costs 3.5 mg! Next?") == ["Hello world.", "It costs 3.5 mg!", "Next?"], "split latin")
 ok(pn.split_into_chunks("今日は晴れ。明日は雨！") == ["今日は晴れ。", "明日は雨！"], "split cjk")
 
@@ -40,7 +43,7 @@ ok(pn.apply_dictionary("X1", _p, "en") == "a\\1b", "backslash in reading is lite
 # --- extraction with explicit/auto language
 from pptx import Presentation
 prs = Presentation(); lay = prs.slide_layouts[5]
-for t in ["今日はDNAの話です。", "Heute sprechen wir über DNA.", "안녕하세요 DNA"]:
+for t in ["今日はDNAの話です。", "Today we talk about DNA and its structure in the cell.", "안녕하세요 여러분 DNA"]:
     s = prs.slides.add_slide(lay); s.notes_slide.notes_text_frame.text = t
 deck = os.path.join(d, "deck.pptx"); prs.save(deck)
 ws = os.path.join(d, "ws"); os.makedirs(ws)

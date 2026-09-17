@@ -3,6 +3,7 @@ deep-translator>=1.11.4
 pydub>=0.25.1
 nltk>=3.8.1
 requests>=2.31.0
+py3langid>=0.3.0
 numpy>=1.24.0
 soundfile>=0.12.1
 torch>=2.0.0

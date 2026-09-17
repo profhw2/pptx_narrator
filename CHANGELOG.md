@@ -3,7 +3,8 @@
 ## 1.2.0 – 2026-09-17
 
 ### Added
-- Multilingual pipeline: `--source-lang` (default `auto`) and free `--target-lang` codes (e.g. `de`, `zh-CN`).
+- Multilingual pipeline: `--source-lang` and free `--target-lang` codes (e.g. `de`, `zh-CN`).
+- Automatic identification of the note language (`--source-lang auto`, default): kana/Hangul rules plus py3langid restricted to Google Translate languages; short or ambiguous notes take the deck's majority language. New dependency: `py3langid`.
 - `--translate` works for any source/target pair supported by Google Translate (previously Japanese → English only).
 - TTS in all languages of the selected engine (Qwen3-TTS: zh, en, ja, ko, de, fr, ru, pt, es, it; GPT-SoVITS: zh, en, ja, ko, yue), with validation of unsupported languages before synthesis. `--ref-lang` accepts any GPT-SoVITS language.
 - Dictionary reading columns `Reading_<lang>`; `--scan` adds the column for `--target-lang` and writes provisional readings for it.

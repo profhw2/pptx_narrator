@@ -8,7 +8,7 @@
 
 ## Features
 
-- **Note extraction** – presenter notes are exported per slide as editable text files; hidden slides are skipped.
+- **Note extraction** – presenter notes are exported per slide as editable text files; the language of each note is identified automatically; hidden slides are skipped.
 - **Translation** – notes can be translated from any source language into any target language supported by Google Translate (via `deep-translator`).
 - **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a pronunciation dictionary (CSV) with one reading column per language, for manual review.
 - **Reading normalization** – dictionary substitution per narration language, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
@@ -26,7 +26,7 @@
 | `--verify` | Japanese: kana-level comparison; other languages: character-level comparison of normalized text (any language recognized by Whisper) |
 | Built-in unit readings | Japanese only (other languages: `unit` entries in the dictionary) |
 
-Languages are given as codes such as `ja`, `en`, `de`, `zh-CN`. `--source-lang auto` (default) guesses the language of each note from its script (kana/kanji → `ja`, Hangul → `ko`, Cyrillic → `ru`, otherwise `en`); specify `--source-lang` explicitly for other languages such as Chinese or German.
+Languages are given as Google Translate codes such as `ja`, `en`, `de`, `zh-CN`. With `--source-lang auto` (default), the language of each note is identified from its text: kana and Hangul are recognized directly, other languages with [py3langid](https://github.com/adbar/py3langid) (restricted to the languages Google Translate accepts). Notes too short or ambiguous to identify reliably, such as "Thank you." or a kanji-only title, are assigned the main language of the deck. The detected language of each slide is shown in the log and in the file name; give `--source-lang` to override it.
 
 ## Requirements
 
@@ -77,11 +77,11 @@ pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3
 ### Translated narration
 
 ```bash
-# Japanese notes -> German narration in the same (cloned) voice
-pptx-narrator --pptx lecture.pptx --workspace ws --source-lang ja --target-lang de \
+# Notes in any language (identified automatically) -> German narration in the same (cloned) voice
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
   --extract --translate --scan
 # review ws/slide_N_de.txt and the Reading_de column of dict.csv, then:
-pptx-narrator --pptx lecture.pptx --workspace ws --source-lang ja --target-lang de \
+pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
   --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
   --verify --pack --out lecture_de.pptx
 ```
@@ -158,7 +158,7 @@ Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_
 ## Limitations
 
 - Kana comparison cannot detect pitch-accent errors, and character comparison cannot detect prosody errors. ASR errors, and numbers or units written differently by the ASR (e.g. "5 mg" vs. "five milligrams"), can cause false flags; flagged slides should be checked by listening.
-- Script-based language detection distinguishes only a few languages; use `--source-lang` for others.
+- Automatic language identification can fail for very short notes in decks without other notes, and for notes mixing several languages; check the file names after `--extract` or give `--source-lang`.
 - Machine translation should be reviewed before synthesis, especially for technical terms.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
 
