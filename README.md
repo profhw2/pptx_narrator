@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22812409.svg)](https://doi.org/10.5281/zenodo.22812409)
 
-**PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in a cloned voice, in the language of the notes or translated into another language, and writes the audio back into the deck. It is designed for technical and scientific lectures that are revised frequently: when a note changes, the corresponding narration is regenerated instead of re-recorded.
+**PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in the presenter's own cloned voice, in the language of the notes or translated into the languages of the audience, and writes the audio back into the deck. The whole deck keeps one consistent voice however often it is revised, narration can be produced even when the presenter cannot speak (a cold, a voice disorder), and the same slides can be offered in several languages. It is useful wherever slides with speaker notes are used: on-demand lectures and review material, conference talks and video abstracts, training, tutorials and public information.
 
 ## Features
 
@@ -13,7 +13,7 @@
 - **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a dictionary for manual review.
 - **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
 - **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server).
-- **ASR round-trip verification** – audio is transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); similarity and character error rate (CER) are reported per slide.
+- **ASR screening (auxiliary)** – audio can be transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); similarity and character error rate (CER) per slide help decide which slides to listen to first.
 - **PPTX repackaging** – the embedded audio of each slide is replaced and the automatic slide advance time (`advTm`) is set to the audio duration. Translated narration can be written into the notes above the original note, in a marked layout that later extractions recognize.
 
 ## Supported languages
@@ -178,7 +178,7 @@ Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_
 
 ### Verification report
 
-`verify_report<suffix>.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
+The report is a listening aid, not a pass/fail test: high similarity usually means the narration is fine, while many low-scoring slides sound natural and only reflect recognition errors. `verify_report<suffix>.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
 
 ## Limitations
 
