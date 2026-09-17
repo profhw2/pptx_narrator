@@ -14,7 +14,7 @@
 - **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
 - **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server).
 - **ASR screening (auxiliary)** – audio can be transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); similarity and character error rate (CER) per slide help decide which slides to listen to first.
-- **PPTX repackaging** – the embedded audio of each slide is replaced and the automatic slide advance time (`advTm`) is set to the audio duration. Translated narration can be written into the notes above the original note, in a marked layout that later extractions recognize.
+- **PPTX repackaging** – the narration audio is embedded in each slide (replacing earlier audio or inserted as a new narration object) and the automatic slide advance time (`advTm`) is set to the audio duration, so the deck plays as a self-running show and can be exported as a video. Translated narration can be written into the notes above the original note, in a marked layout that later extractions recognize.
 
 ## Supported languages
 
@@ -135,7 +135,7 @@ A v1.x dictionary (`Term,Japanese_Reading,English_Reading,Type`) can still be gi
 
 ## Packing and notes write-back
 
-`--pack` *replaces* audio that is already embedded in a slide; it does not insert new audio objects. Prepare the deck once, e.g. by recording a slide show narration in PowerPoint or inserting any audio clip on each slide to be narrated. To have slides advance automatically, set the slide transition to advance *After* a time; that time is overwritten with the length of the generated audio. Slides without embedded audio are reported and left unchanged.
+`--pack` embeds the generated audio in the same structure PowerPoint uses for recorded narration: the audio starts with the slide, is hidden during the show, and the slide advances automatically after the audio length. Slides without audio get a new narration object (a small speaker icon at the bottom right, visible only in the editor). If a slide already has audio (e.g. an earlier recording), that object is reused: it points to the new audio, and its trim, fade and bookmarks are removed. Each slide gets its own media file, so copied slides that shared one clip no longer overwrite each other, and clips no longer used are removed from the file. Slides that have animations but no audio are reported and left unchanged; insert any audio clip on such a slide in PowerPoint and pack again. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
 
 With `--writeback-notes`, the narration is written into the notes. When it differs from the original note (translated narration, or the rewritten text with `--use-spoken-notes`), the note keeps both parts:
 

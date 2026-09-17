@@ -17,7 +17,6 @@ import shutil
 import logging
 import argparse
 import tempfile
-import xml.etree.ElementTree as ET
 import zipfile
 import csv
 import json
@@ -1186,49 +1185,283 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)
-    rel_ns = '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(tmp_pptx, 'r') as z:
             z.extractall(tmpdir)
+        slide_w, slide_h = _slide_size(tmpdir)
+        slide_parts = _slide_part_paths(tmpdir)
         for s_num in requested_slides:
             m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
-            if not os.path.exists(m4a_p):
-                continue
-            rels_p = os.path.join(tmpdir, "ppt", "slides", "_rels", f"slide{s_num}.xml.rels")
-            replaced = False
-            if os.path.exists(rels_p):
-                tree = ET.parse(rels_p)
-                for rel in tree.getroot().findall(rel_ns):
-                    target = rel.get('Target', '')
-                    if not target.endswith(('.m4a', '.wav')):
-                        continue
-                    shutil.copy(m4a_p, os.path.join(tmpdir, "ppt", "media", os.path.basename(target)))
-                    dur = len(AudioSegment.from_file(m4a_p))
-                    xml_p = os.path.join(tmpdir, "ppt", "slides", f"slide{s_num}.xml")
-                    with open(xml_p, "r", encoding="utf-8") as f:
-                        xml_c = f.read()
-                    if not re.search(r'advTm="\d+"', xml_c):
-                        logger.warning(f"Slide #{s_num}: no automatic slide timing (advTm) found; display duration left unchanged.")
-                    xml_c = re.sub(r'advTm="\d+"', f'advTm="{dur}"', xml_c)
-                    # The old clip's trim, fade and bookmarks would otherwise cut or fade the new audio
-                    media_ids = {r.get('Id') for r in tree.getroot().findall(rel_ns) if r.get('Target', '') == target}
-                    xml_c, n_cleared = clear_media_playback_settings(xml_c, media_ids)
-                    if n_cleared:
-                        logger.info(f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
-                    with open(xml_p, "w", encoding="utf-8") as f:
-                        f.write(xml_c)
-                    replaced = True
-                    logger.info(f"Slide #{s_num}: audio replaced ({dur} ms).")
-                    break
-            if not replaced:
-                logger.warning(
-                    f"Slide #{s_num}: generated audio exists but the slide has no embedded audio "
-                    "object to replace (skipped). Add a placeholder audio clip in PowerPoint first."
-                )
-        archive_path = shutil.make_archive(os.path.splitext(output_pptx)[0] + ".packing", 'zip', tmpdir)
+            if os.path.exists(m4a_p) and s_num <= len(slide_parts):
+                embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
+                                      slide_w, slide_h, slide_part=slide_parts[s_num - 1])
+        _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
+        _remove_unreferenced_media(tmpdir)
+        archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
         os.replace(archive_path, output_pptx)
     os.remove(tmp_pptx)
     logger.info(f"Final output saved to: {output_pptx}")
+
+
+# ------------------------------------------
+# Embedding narration audio in slide XML
+# ------------------------------------------
+# The structure written here follows what PowerPoint itself writes for recorded slide
+# narration: a p:pic with a:audioFile / p14:media, audio + media + icon relationships,
+# a p:timing that starts the audio with the slide (isNarration="1"), and the slide
+# transition's advance time (advTm) set to the audio length.
+REL_AUDIO = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio"
+REL_MEDIA = "http://schemas.microsoft.com/office/2007/relationships/media"
+REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+_RELS_EMPTY = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+               '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
+NARRATION_ICON = "pptx_narrator_audio.png"
+
+_NARRATION_TIMING = (
+    '<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot"><p:childTnLst>'
+    '<p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>'
+    '<p:par><p:cTn id="3" fill="hold"><p:stCondLst><p:cond delay="indefinite"/><p:cond evt="onBegin" delay="0">'
+    '<p:tn val="2"/></p:cond></p:stCondLst><p:childTnLst><p:par><p:cTn id="4" fill="hold"><p:stCondLst>'
+    '<p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="5" presetID="1" presetClass="mediacall" '
+    'presetSubtype="0" fill="hold" nodeType="afterEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst>'
+    '<p:childTnLst><p:cmd type="call" cmd="playFrom(0.0)"><p:cBhvr><p:cTn id="6" dur="1" fill="hold"/>'
+    '<p:tgtEl><p:spTgt spid="{spid}"/></p:tgtEl></p:cBhvr></p:cmd></p:childTnLst></p:cTn></p:par>'
+    '</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn>'
+    '<p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>'
+    '<p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>'
+    '</p:seq><p:audio isNarration="1"><p:cMediaNode vol="80000" showWhenStopped="0"><p:cTn id="7" fill="hold" '
+    'display="0"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst><p:endCondLst><p:cond evt="onStopAudio" '
+    'delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:endCondLst></p:cTn><p:tgtEl><p:spTgt spid="{spid}"/>'
+    '</p:tgtEl></p:cMediaNode></p:audio></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>'
+)
+
+
+def _rel_elements(rels_xml):
+    return [(m.group(0), dict(re.findall(r'(\w+)="([^"]*)"', m.group(0))))
+            for m in re.finditer(r'<Relationship\b[^>]*?/>', rels_xml)]
+
+
+def _set_rel_target(rels_xml, rel_id, target):
+    def _fix(m):
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(0)))
+        if attrs.get("Id") != rel_id:
+            return m.group(0)
+        return f'<Relationship Id="{rel_id}" Type="{attrs["Type"]}" Target="{target}"/>'
+    return re.sub(r'<Relationship\b[^>]*?/>', _fix, rels_xml)
+
+
+def _new_rel_id(rels_xml):
+    used = {int(n) for n in re.findall(r'Id="rId(\d+)"', rels_xml)}
+    n = 1
+    while n in used:
+        n += 1
+    return f"rId{n}"
+
+
+def _add_rel(rels_xml, rel_type, target):
+    rel_id = _new_rel_id(rels_xml)
+    rel = f'<Relationship Id="{rel_id}" Type="{rel_type}" Target="{target}"/>'
+    return rels_xml.replace("</Relationships>", rel + "</Relationships>"), rel_id
+
+
+def _slide_size(pkg_dir):
+    try:
+        with open(os.path.join(pkg_dir, "ppt", "presentation.xml"), encoding="utf-8") as f:
+            m = re.search(r'<p:sldSz\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"', f.read())
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except OSError:
+        pass
+    return 12192000, 6858000
+
+
+def _speaker_icon_png(size=64):
+    """A small grey loudspeaker icon (only visible in the editor; hidden during the slide show)."""
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            u, v = x / size, y / size
+            body = 0.18 <= u <= 0.36 and 0.38 <= v <= 0.62
+            cone = 0.36 <= u <= 0.58 and abs(v - 0.5) <= 0.12 + (u - 0.36) * 1.1
+            r = ((u - 0.58) ** 2 + (v - 0.5) ** 2) ** 0.5
+            wave = u > 0.62 and abs(v - 0.5) < (u - 0.5) and (0.12 < r < 0.17 or 0.24 < r < 0.29)
+            row += bytes((90, 90, 90, 255)) if (body or cone or wave) else bytes((0, 0, 0, 0))
+        rows.append(bytes(row))
+    import struct
+    import zlib
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+
+
+def _insert_after_transition_or_clrmap(slide_xml, fragment):
+    m = re.search(r'<mc:AlternateContent\b(?:(?!</mc:AlternateContent>).)*?<p:transition\b.*?</mc:AlternateContent>',
+                  slide_xml, re.DOTALL)
+    if not m:
+        m = re.search(r'<p:transition\b[^>]*/>|<p:transition\b.*?</p:transition>', slide_xml, re.DOTALL)
+    if not m:
+        m = re.search(r'</p:clrMapOvr>|<p:clrMapOvr\b[^>]*/>', slide_xml) or re.search(r'</p:cSld>', slide_xml)
+    return slide_xml[:m.end()] + fragment + slide_xml[m.end():]
+
+
+def _set_advance_time(slide_xml, dur_ms):
+    if re.search(r'<p:transition\b', slide_xml):
+        def _fix(m):
+            tag = m.group(0)
+            if 'advTm="' in tag:
+                return re.sub(r'advTm="\d+"', f'advTm="{dur_ms}"', tag)
+            return re.sub(r'^<p:transition\b', f'<p:transition advTm="{dur_ms}"', tag)
+        return re.sub(r'<p:transition\b[^>]*>', _fix, slide_xml)
+    return _insert_after_transition_or_clrmap(slide_xml, f'<p:transition advTm="{dur_ms}"/>')
+
+
+def _slide_part_paths(pkg_dir):
+    """Slide part paths (relative to the package root) in presentation order."""
+    with open(os.path.join(pkg_dir, "ppt", "presentation.xml"), encoding="utf-8") as f:
+        pres_xml = f.read()
+    with open(os.path.join(pkg_dir, "ppt", "_rels", "presentation.xml.rels"), encoding="utf-8") as f:
+        targets = {a.get("Id"): a.get("Target", "") for _, a in _rel_elements(f.read())}
+    paths = []
+    for rel_id in re.findall(r'<p:sldId\b[^>]*\br:id="([^"]+)"', pres_xml):
+        target = targets.get(rel_id, "")
+        target = target.lstrip("/") if target.startswith("/") else os.path.normpath(os.path.join("ppt", target))
+        paths.append(target.replace(os.sep, "/"))
+    return paths
+
+
+def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, slide_h=6858000, slide_part=None):
+    """Put the narration audio into slide s_num of an unzipped PPTX package.
+
+    Each slide gets its own media file, so slides that shared one audio clip (e.g. copied
+    slides) no longer overwrite each other. An existing narration object is re-pointed to
+    it and its trim, fade and bookmarks are removed; a slide without audio gets a new
+    auto-playing narration object. Returns "replaced", "inserted" or None.
+    """
+    slide_part = slide_part or f"ppt/slides/slide{s_num}.xml"
+    slide_p = os.path.join(pkg_dir, *slide_part.split("/"))
+    rels_p = os.path.join(os.path.dirname(slide_p), "_rels", os.path.basename(slide_p) + ".rels")
+    if not os.path.exists(slide_p):
+        return None
+    with open(slide_p, encoding="utf-8") as f:
+        slide_xml = f.read()
+    rels_xml = _RELS_EMPTY
+    if os.path.exists(rels_p):
+        with open(rels_p, encoding="utf-8") as f:
+            rels_xml = f.read()
+
+    media_dir = os.path.join(pkg_dir, "ppt", "media")
+    os.makedirs(media_dir, exist_ok=True)
+    media_name = f"pptx_narrator_slide{s_num}.m4a"
+    shutil.copy(audio_path, os.path.join(media_dir, media_name))
+    target = f"../media/{media_name}"
+
+    # Prefer the object PowerPoint marks as narration; otherwise take the first audio object.
+    narration_ids = set(re.findall(r'<p:audio\b[^>]*isNarration="1".*?<p:spTgt spid="(\d+)"', slide_xml, re.DOTALL))
+    pic = None
+    for m in re.finditer(r'<p:pic\b.*?</p:pic>', slide_xml, re.DOTALL):
+        if '<a:audioFile' in m.group(0) or '<p14:media' in m.group(0):
+            pic_id = re.search(r'<p:cNvPr\b[^>]*\bid="(\d+)"', m.group(0))
+            if pic is None or (pic_id and pic_id.group(1) in narration_ids):
+                pic = m.group(0)
+            if pic_id and pic_id.group(1) in narration_ids:
+                break
+
+    if pic is not None:
+        rel_ids = set(re.findall(r'<a:audioFile\b[^>]*r:link="([^"]+)"', pic))
+        rel_ids |= set(re.findall(r'<p14:media\b[^>]*r:embed="([^"]+)"', pic))
+        for rel_id in rel_ids:
+            rels_xml = _set_rel_target(rels_xml, rel_id, target)
+        slide_xml, n_cleared = clear_media_playback_settings(slide_xml, rel_ids)
+        if n_cleared:
+            logger.info(f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
+        status = "replaced"
+    else:
+        if '<p:timing' in slide_xml:
+            logger.warning(f"Slide #{s_num}: the slide has animations but no audio object; narration not inserted "
+                           "(insert any audio clip on this slide in PowerPoint and pack again).")
+            return None
+        icon_p = os.path.join(media_dir, NARRATION_ICON)
+        if not os.path.exists(icon_p):
+            with open(icon_p, "wb") as f:
+                f.write(_speaker_icon_png())
+        rels_xml, rid_media = _add_rel(rels_xml, REL_MEDIA, target)
+        rels_xml, rid_audio = _add_rel(rels_xml, REL_AUDIO, target)
+        rels_xml, rid_icon = _add_rel(rels_xml, REL_IMAGE, f"../media/{NARRATION_ICON}")
+        spid = max([int(i) for i in re.findall(r'<p:cNvPr\b[^>]*\bid="(\d+)"', slide_xml)] + [1]) + 1
+        size = 812800
+        x, y = max(slide_w - size - 215900, 0), max(slide_h - size - 215900, 0)
+        pic_xml = (
+            f'<p:pic><p:nvPicPr><p:cNvPr id="{spid}" name="Narration {spid}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/>'
+            f'</p:cNvPicPr><p:nvPr><a:audioFile r:link="{rid_audio}"/><p:extLst><p:ext uri="{{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}}">'
+            f'<p14:media xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" r:embed="{rid_media}"/>'
+            f'</p:ext></p:extLst></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="{rid_icon}"/><a:stretch><a:fillRect/>'
+            f'</a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{size}" cy="{size}"/></a:xfrm>'
+            f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+        )
+        slide_xml = slide_xml.replace("</p:spTree>", pic_xml + "</p:spTree>", 1)
+        slide_xml = _set_advance_time(slide_xml, dur_ms)
+        slide_xml = _insert_after_transition_or_clrmap(slide_xml, _NARRATION_TIMING.replace("{spid}", str(spid)))
+        status = "inserted"
+
+    if status == "replaced":
+        slide_xml = _set_advance_time(slide_xml, dur_ms)
+    with open(slide_p, "w", encoding="utf-8") as f:
+        f.write(slide_xml)
+    os.makedirs(os.path.dirname(rels_p), exist_ok=True)
+    with open(rels_p, "w", encoding="utf-8") as f:
+        f.write(rels_xml)
+    logger.info(f"Slide #{s_num}: narration {status} ({dur_ms} ms).")
+    return status
+
+
+def _ensure_default_content_types(pkg_dir, defaults):
+    path = os.path.join(pkg_dir, "[Content_Types].xml")
+    with open(path, encoding="utf-8") as f:
+        xml = f.read()
+    for ext, ctype in defaults.items():
+        if not re.search(rf'<Default\b[^>]*Extension="{ext}"', xml, re.IGNORECASE):
+            xml = xml.replace("<Default ", f'<Default Extension="{ext}" ContentType="{ctype}"/><Default ', 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(xml)
+
+
+def _remove_unreferenced_media(pkg_dir):
+    media_dir = os.path.join(pkg_dir, "ppt", "media")
+    if not os.path.isdir(media_dir):
+        return
+    referenced = set()
+    for root, _, files in os.walk(pkg_dir):
+        for name in files:
+            if name.endswith(".rels"):
+                with open(os.path.join(root, name), encoding="utf-8") as f:
+                    referenced.update(os.path.basename(t) for t in re.findall(r'Target="([^"]+)"', f.read()))
+    removed = [name for name in os.listdir(media_dir) if name not in referenced]
+    for name in removed:
+        os.remove(os.path.join(media_dir, name))
+    if removed:
+        ct_path = os.path.join(pkg_dir, "[Content_Types].xml")
+        with open(ct_path, encoding="utf-8") as f:
+            ct_xml = f.read()
+        for name in removed:
+            ct_xml = re.sub(rf'<Override\b[^>]*PartName="/ppt/media/{re.escape(name)}"[^>]*/>', "", ct_xml)
+        with open(ct_path, "w", encoding="utf-8") as f:
+            f.write(ct_xml)
+
+
+def _zip_package(pkg_dir, zip_path):
+    """Zip an unzipped OOXML package with [Content_Types].xml as the first entry."""
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(os.path.join(pkg_dir, "[Content_Types].xml"), "[Content_Types].xml")
+        for root, _, files in os.walk(pkg_dir):
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                arc = os.path.relpath(full, pkg_dir).replace(os.sep, "/")
+                if arc != "[Content_Types].xml":
+                    z.write(full, arc)
+    return zip_path
 
 # ==========================================
 # Main CLI

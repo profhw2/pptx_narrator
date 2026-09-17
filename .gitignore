@@ -25,3 +25,4 @@ dist/
 
 # manuscript (kept locally, not published with the software)
 softwarex_paper.*
+_test_output/

@@ -195,24 +195,50 @@ ok([round(x, 3) if isinstance(x, float) else x for x in pn.kana_scores("今日�
    == [0.824, 0.25, "キョーワハレデス", "キョーワハレデシタ"], "kana similarity and CER")
 
 # ---------------------------------------------------------------- packing
+# Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;
+# slide 3 is a copy of slide 2 that shares its media file (its audio link is "NULL").
+P14 = 'xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"'
+def audio_pic(link, embed, trim):
+    return ('<p:pic><p:nvPicPr><p:cNvPr id="4" name="Audio 3"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>'
+            f'<p:nvPr><a:audioFile r:link="{link}"/><p:extLst><p:ext uri="{{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}}">'
+            f'<p14:media {P14} r:embed="{embed}">{trim}</p14:media></p:ext></p:extLst></p:nvPr></p:nvPicPr>'
+            '<p:blipFill><a:blip r:embed="rId90"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/>'
+            '<a:ext cx="812800" cy="812800"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>')
+transition = ('<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice '
+              f'{P14} Requires="p14"><p:transition spd="slow" p14:dur="2000" advTm="4289"/></mc:Choice><mc:Fallback>'
+              '<p:transition spd="slow" advTm="4289"/></mc:Fallback></mc:AlternateContent>')
+REL = '<Relationship Id="{}" Type="{}" Target="{}"{}/>'
+media_rels = {
+    2: [("rId91", pn.REL_AUDIO, "../media/media1.m4a", ""), ("rId92", pn.REL_MEDIA, "../media/media1.m4a", "")],
+    3: [("rId91", pn.REL_AUDIO, "NULL", ' TargetMode="External"'), ("rId92", pn.REL_MEDIA, "../media/media1.m4a", "")],
+}
 z_in = zipfile.ZipFile(deck)
 packed = os.path.join(d, "deck_audio.pptx")
 z_out = zipfile.ZipFile(packed, "w", zipfile.ZIP_DEFLATED)
 for item in z_in.infolist():
     data = z_in.read(item.filename)
+    m = re.match(r"ppt/slides/(_rels/)?slide(\d)\.xml(\.rels)?$", item.filename)
     if item.filename == "[Content_Types].xml":
-        data = data.replace(b"<Default ", b'<Default Extension="m4a" ContentType="audio/mp4"/><Default ', 1)
-    if item.filename == "ppt/slides/_rels/slide1.xml.rels":
-        data = data.replace(b"</Relationships>", b'<Relationship Id="rId99" Type="http://schemas.microsoft.com/office/2007/relationships/media" Target="../media/media1.m4a"/></Relationships>')
-    if item.filename == "ppt/slides/slide1.xml":
-        data = re.sub(rb"</p:cSld>", b'</p:cSld><p:transition advTm="500"/>', data, count=1)
+        data = data.replace(b"<Default ", b'<Default Extension="m4a" ContentType="audio/mp4"/><Default Extension="png" ContentType="image/png"/><Default ', 1)
+    elif m and int(m.group(2)) in media_rels:
+        n = int(m.group(2))
+        if m.group(1):
+            rels = "".join(REL.format(*r) for r in media_rels[n] + [("rId90", pn.REL_IMAGE, "../media/image1.png", "")])
+            data = data.replace(b"</Relationships>", rels.encode() + b"</Relationships>")
+        else:
+            trim = '<p14:trim st="700.2867" end="1499.8366"/>'
+            timing = pn._NARRATION_TIMING.replace("{spid}", "4")
+            data = data.replace(b"</p:spTree>", audio_pic("rId91", "rId92", trim).encode() + b"</p:spTree>")
+            data = re.sub(rb"(</p:clrMapOvr>)", lambda mm: mm.group(1) + transition.encode() + timing.encode(), data, count=1)
     z_out.writestr(item, data)
 AudioSegment.silent(duration=300).export(os.path.join(d, "m.m4a"), format="ipod")
 z_out.writestr("ppt/media/media1.m4a", open(os.path.join(d, "m.m4a"), "rb").read())
+z_out.writestr("ppt/media/image1.png", pn._speaker_icon_png(8))
 z_out.close()
-AudioSegment.silent(duration=1800).export(os.path.join(ws, "slide_1_de.v4.m4a"), format="ipod")
+for n, dur in [(1, 1800), (2, 2500), (3, 3200)]:
+    AudioSegment.silent(duration=dur).export(os.path.join(ws, f"slide_{n}_de.v4.m4a"), format="ipod")
 out_deck = os.path.join(d, "out.pptx")
-pn.step_pack_pptx(packed, out_deck, ws, [1, 2], "de", "v4", source_lang="auto", writeback_notes=True)
+pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4", source_lang="auto", writeback_notes=True)
 notes = Presentation(out_deck).slides[0].notes_slide.notes_text_frame.text
 info = pn.parse_structured_note(notes)
 ok(notes.startswith("=== pptx-narrator: narration [de] from [ja] #") and info and info["narration_lang"] == "de"
@@ -220,8 +246,32 @@ ok(notes.startswith("=== pptx-narrator: narration [de] from [ja] #") and info an
    and info["fingerprint"] == pn.text_fingerprint("塩基対の話です。"), "write-back: marked narration part followed by the original note")
 notes2 = Presentation(out_deck).slides[1].notes_slide.notes_text_frame.text
 ok(pn.parse_structured_note(notes2)["source_lang"] == "en", "write-back for an English-note slide")
-adv = re.findall(rb'advTm="(\d+)"', zipfile.ZipFile(out_deck).read("ppt/slides/slide1.xml"))
-ok(adv and 1700 < int(adv[0]) < 2000, f"slide timing set to the audio length {adv}")
+
+zo = zipfile.ZipFile(out_deck)
+names = zo.namelist()
+sx = {n: zo.read(f"ppt/slides/slide{n}.xml").decode() for n in (1, 2, 3)}
+rx = {n: zo.read(f"ppt/slides/_rels/slide{n}.xml.rels").decode() for n in (1, 2, 3)}
+import xml.dom.minidom
+for name in names:
+    if name.endswith((".xml", ".rels")):
+        xml.dom.minidom.parseString(zo.read(name))
+ok(names[0] == "[Content_Types].xml", "packed file is a well-formed package")
+adv = {n: [int(a) for a in re.findall(r'advTm="(\d+)"', sx[n])] for n in (1, 2, 3)}
+ok(all(adv[n] and all(abs(a - dur) < 100 for a in adv[n]) for n, dur in [(1, 1800), (2, 2500), (3, 3200)]),
+   f"slide advance times set to the audio lengths {adv}")
+ok('<a:audioFile r:link=' in sx[1] and 'isNarration="1"' in sx[1] and "pptx_narrator_slide1.m4a" in rx[1]
+   and re.search(r"</p:clrMapOvr><p:transition[^>]*/><p:timing>", sx[1]), "narration inserted into a slide without audio")
+ok("pptx_narrator_slide2.m4a" in rx[2] and "pptx_narrator_slide3.m4a" in rx[3] and "NULL" not in rx[3]
+   and "ppt/media/media1.m4a" not in names, "copied slides get their own audio; the unused old clip is removed")
+ok("p14:trim" not in sx[2] and "p14:trim" not in sx[3] and sx[2].count("<p:pic>") == 1, "trim of the previous recording removed")
+ok(len(Presentation(out_deck).slides) == 3, "packed deck opens with python-pptx")
+
+logs.clear()
+pkg = tempfile.mkdtemp()
+os.makedirs(os.path.join(pkg, "ppt", "slides"))
+write(os.path.join(pkg, "ppt", "slides", "slide1.xml"), '<p:sld><p:cSld><p:spTree></p:spTree></p:cSld><p:timing></p:timing></p:sld>')
+ok(pn.embed_slide_narration(pkg, 1, os.path.join(d, "m.m4a"), 300) is None and any("animations" in m for m in logs),
+   "slide with animations but no audio object is left alone with a warning")
 
 xml_trim = ('<p14:media r:embed="rId2"><p14:trim st="1200" end="800"/><p14:fade in="500"/><p14:bmkLst><p14:bmk name="a" time="1"/></p14:bmkLst></p14:media>'
             '<p14:media r:embed="rId9"><p14:trim st="10"/></p14:media>')

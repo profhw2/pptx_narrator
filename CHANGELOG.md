@@ -12,7 +12,10 @@
 - `--verify` for languages other than Japanese (character-level similarity and CER on normalized text).
 - `tests/smoke_test.py` (back-ends mocked).
 
+- `--pack` inserts narration into slides that have no audio yet, using the XML structure PowerPoint writes for recorded narration (auto-play, hidden during the show, `isNarration`).
+
 ### Changed
+- `--pack` gives each slide its own media file (copied slides sharing one clip were overwritten together), removes the trim, fade and bookmarks of the reused audio object, prefers the object marked as narration, removes media no longer referenced, and locates slides by presentation order rather than part name.
 - There is no implicit default dictionary: give `--dict-file` (required by `--scan`). A v1.x `dict.csv` can be passed with `--dict-file`; the Japanese or English column is used according to the narration language.
 - Workspace files for languages other than Japanese/English are named `slide_N_<lang>.txt`; the Japanese (`slide_N.txt`) and English (`slide_N_eng.txt`) names are unchanged.
 - Verification report: kana columns renamed to `intended_normalized` / `asr_normalized`; report file includes the language suffix for non-Japanese narration.
