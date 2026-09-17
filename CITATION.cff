@@ -1,4 +1,4 @@
-cff-version: 1.2.0
+cff-version: 1.0.0
 title: "PPTX-Narrator: Automated Slide Narration Pipeline with Technical Term Normalization and ASR Verification"
 message: "If you use this software, please cite it as below."
 type: software
@@ -13,7 +13,7 @@ doi: "10.5281/zenodo.22812409"
 identifiers:
   - type: doi
     value: "10.5281/zenodo.22812409"
-    description: "Zenodo archive of v1.1.0"
+    description: "Zenodo archive of v1.0.0"
 keywords:
   - text-to-speech
   - voice-cloning
@@ -21,5 +21,5 @@ keywords:
   - education-technology
   - speech-synthesis
 license: MIT
-version: 1.2.0
-date-released: 2026-09-17
+version: 1.0.0
+date-released: 2026-09-18
