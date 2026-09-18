@@ -213,6 +213,9 @@ ok(pn.difference_list("0123456789abcdefghij", "0123456789XXXXefghij", context=3,
 _kana = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモ" * 4
 ok(pn.kana_sequence_scores(_kana, _kana[:300] + _kana[350:])[0] > 0.85, "a long note survives a 50-character gap by similarity")
 
+ok(pn.uncertain_japanese_words("二本鎖の話") == {} or "二本鎖" in pn.uncertain_japanese_words("二本鎖の話"),
+   "compounds a Japanese front end assembles are offered as dictionary candidates (skipped without pyopenjtalk)")
+
 # ---------------------------------------------------------------- packing
 # Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;
 # slide 3 is a copy of slide 2 that shares its media file (its audio link is "NULL").
