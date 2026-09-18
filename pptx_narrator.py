@@ -1175,16 +1175,17 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
             logger.error(f"Slide {slide_num}: comparison failed: {e}")
             continue
 
+        n_runs, worst_run = difference_runs(norm_intended, norm_asr)
+        for pos, said, heard, before, after in difference_list(norm_intended, norm_asr, minimum=min_difference):
+            differences.append((slide_num, max(len(said), len(heard)), pos, said, heard, before, after))
+
         # Latin-script words left in Japanese narration cannot be compared reliably as kana
         has_latin = is_ja and bool(re.search(r'[A-Za-z]{2,}', intended_text))
+        long_difference = max_difference is not None and worst_run > max_difference
         failed = (score < threshold or long_difference
                   or (cer_threshold is not None and cer > cer_threshold))
         status = "ENGLISH" if has_latin else ("FLAGGED" if failed else "OK")
 
-        n_runs, worst_run = difference_runs(norm_intended, norm_asr)
-        for pos, said, heard, before, after in difference_list(norm_intended, norm_asr, minimum=min_difference):
-            differences.append((slide_num, max(len(said), len(heard)), pos, said, heard, before, after))
-        long_difference = max_difference is not None and worst_run > max_difference
         results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
                         intended_text, asr_text, norm_intended, norm_asr))
         logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
