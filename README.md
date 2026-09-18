@@ -203,6 +203,12 @@ python tests/smoke_test.py
 
 The smoke test mocks the TTS, ASR and translation back-ends, so no models or network access are needed (requires `numpy`, `soundfile` and FFmpeg).
 
+## Support and contributions
+
+Questions and bug reports are welcome as GitHub issues. Please include the command you ran, the log output, and, if possible, a small deck that reproduces the problem (`examples/make_sample_deck.py` builds one). Do not attach reference recordings or unpublished course material.
+
+The tool is maintained alongside teaching and research, so replies can take a while and new features are added as they become necessary for the author's own lecture material. Pull requests are welcome; small, self-contained changes are the easiest to review, and `python tests/smoke_test.py` should pass.
+
 ## Citation
 
 If you use PPTX-Narrator, please cite the archived release on Zenodo; its DOI is added here and to [`CITATION.cff`](CITATION.cff) with the v1.0.0 release. Changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
