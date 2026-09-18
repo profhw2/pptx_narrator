@@ -343,6 +343,11 @@ def spell_out_letters(s: str, letter_map: dict = None) -> str:
 # ==========================================
 # Dictionary & Term Scanning Logic
 # ==========================================
+def _is_single_letter(term):
+    """A lone Latin letter or digit (e.g. the A of a base pair) is never a useful candidate."""
+    return bool(re.fullmatch(r'[A-Za-z0-9]', term.strip()))
+
+
 def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slides, target_lang,
                               source_lang="auto", for_translation=False):
     """Collect candidate terms and append them to the dictionary file of the run.
@@ -401,7 +406,7 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
 
         for term in generic_found:
             term_lower = term.lower()
-            if term_lower in existing_terms or term_lower in stop_words:
+            if _is_single_letter(term) or term_lower in existing_terms or term_lower in stop_words:
                 continue
             if re.fullmatch(rf'[{latin}]+', term):
                 acronym_like = term.isupper() or bool(re.search(r'[a-z][A-Z]', term))
@@ -416,7 +421,7 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
 
         for term in bypass_found:
             term_lower = term.lower()
-            if term_lower in existing_terms:
+            if _is_single_letter(term) or term_lower in existing_terms:
                 continue
             candidates[term] = narration_text
             existing_terms.add(term_lower)
