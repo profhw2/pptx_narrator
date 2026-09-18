@@ -1,7 +1,7 @@
 {
   "title": "PPTX-Narrator: Automated Slide Narration Pipeline with Technical Term Normalization and ASR Verification",
   "upload_type": "software",
-  "description": "Open-source Python pipeline that turns PowerPoint presenter notes into voice-cloned narration (GPT-SoVITS or Qwen3-TTS), with technical-term and SI-unit normalization, ASR round-trip verification and automatic PPTX repackaging.",
+  "description": "Open-source Python tool that turns the presenter notes of a PowerPoint deck into narration and embeds the audio and slide timings in the deck, which then plays by itself and can be exported as a video. The narration is synthesized with Qwen3-TTS or GPT-SoVITS in a voice cloned from a few seconds of reference speech. The note language is identified automatically and the notes can be machine-translated, so the same slides can be narrated in several languages; user-defined dictionaries fix the reading and translation of technical terms and units, and an ASR round trip flags slides whose narration deviates from the text.",
   "creators": [
     {
       "name": "Watanabe, Hidemi",
@@ -10,5 +10,13 @@
     }
   ],
   "license": "mit",
-  "keywords": ["text-to-speech", "voice-cloning", "powerpoint", "education-technology", "speech-synthesis"]
+  "keywords": [
+    "text-to-speech",
+    "voice-cloning",
+    "powerpoint",
+    "education-technology",
+    "speech-synthesis",
+    "machine-translation",
+    "lecture-video"
+  ]
 }
