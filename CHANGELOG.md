@@ -17,3 +17,5 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - `--tts` reports the synthesis time per slide and a summary for the run.
 - `tests/smoke_test.py` covers the pipeline with the back-ends mocked.
 - `examples/make_sample_deck.py` builds a small deck with notes for trying the pipeline.
+- `examples/readings_ja_molbio.csv`, a working reading dictionary from the author's molecular-biology lectures.
+- Dictionary entries containing a backslash are reported, because they are matched literally and usually come from shell escaping.

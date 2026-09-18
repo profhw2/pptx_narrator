@@ -565,6 +565,9 @@ def read_dictionary_file(path, lang=None):
     for r in body:
         if len(r) <= repl_col or not r[term_col].strip():
             continue
+        if "\\" in r[term_col]:
+            logger.warning(f"{path}: the entry '{r[term_col].strip()}' contains a backslash and is matched literally; "
+                           "write the string as it appears in the notes.")
         typ = r[type_col].strip().lower() if type_col is not None and len(r) > type_col else ""
         entries.append((r[term_col].strip(), r[repl_col].strip(), "unit" if typ == "unit" else ""))
     return entries
