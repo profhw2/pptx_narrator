@@ -1,6 +1,6 @@
 # Readings used for the author's molecular-biology lectures (Japanese narration).
-# string,replacement,type - lines starting with '#' are comments, so an entry can be
-# switched off or annotated without deleting it.
+# string,replacement,type - a '#' starts a comment, so an entry can be annotated or
+# switched off without deleting it.
 string,replacement,type
 14N,じゅうよんエヌ,
 2ビット,にビット,
