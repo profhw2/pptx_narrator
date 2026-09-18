@@ -605,6 +605,19 @@ def append_dictionary_entries(path, new_entries):
             writer.writerow([term, repl, ""])
 
 
+# Apostrophes and primes come in several shapes: PowerPoint turns ' into ’ while
+# notes pasted from a paper may use ′. A dictionary entry written with one of them should
+# still match the others, so both text and terms are mapped to the plain forms.
+_LOOKALIKES = {ord(c): "'" for c in "‘’‛′ʹ´＇"}
+_LOOKALIKES.update({ord(c): '"' for c in "“”‟″＂"})
+_LOOKALIKES.update({ord(c): "-" for c in "‐‑‒–−－"})
+
+
+def normalize_lookalikes(text):
+    """Map typographic quotes, primes and dashes to their plain ASCII forms."""
+    return text.translate(_LOOKALIKES)
+
+
 def _replace_term(text, term, replacement):
     if re.match(r'^[a-zA-Z0-9_ \-]+$', term):
         pattern = rf'(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])'
@@ -618,10 +631,11 @@ def apply_dictionary(text, entries, lang, letter_map=None, builtin_units=True):
     builtin_units=False (used before translation) disables the built-in Japanese unit
     readings and the letter map, so that only the dictionary's own unit entries apply.
     """
-    text = unicodedata.normalize('NFC', text)
+    text = normalize_lookalikes(unicodedata.normalize('NFC', text))
     units, terms = {}, {}
     for term, repl, typ in entries or []:
-        term, repl = unicodedata.normalize('NFC', term), unicodedata.normalize('NFC', repl)
+        term = normalize_lookalikes(unicodedata.normalize('NFC', term))
+        repl = unicodedata.normalize('NFC', repl)
         if repl:
             (units if typ == "unit" else terms)[term] = repl
     for term, repl in sorted(terms.items(), key=lambda x: len(x[0]), reverse=True):

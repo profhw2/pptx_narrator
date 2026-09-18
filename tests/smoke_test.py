@@ -194,6 +194,9 @@ sys.modules["pyopenjtalk"] = pj
 ok([round(x, 3) if isinstance(x, float) else x for x in pn.kana_scores("今日は晴れです。", "今日は晴れでした")]
    == [0.824, 0.25, "キョーワハレデス", "キョーワハレデシタ"], "kana similarity and CER")
 
+ok(pn.apply_dictionary("5\u2019末端と5\u2032末端", [("5'", "ごだっしゅ", "")], "ja") == "ごだっしゅ末端とごだっしゅ末端",
+   "typographic apostrophes and primes match a plain dictionary entry")
+
 # ---------------------------------------------------------------- packing
 # Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;
 # slide 3 is a copy of slide 2 that shares its media file (its audio link is "NULL").
