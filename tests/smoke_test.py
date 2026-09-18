@@ -208,6 +208,8 @@ ok([t for t, _, _ in pn.read_dictionary_file(quoted, "ja")] == ["#1", "C#"],
 
 ok(pn.difference_runs("abcdefghij", "abXXXXghij") == (1, 4) and pn.difference_runs("abc", "abc") == (0, 0),
    "difference runs count the places that differ and the longest one")
+ok(pn.difference_list("0123456789abcdefghij", "0123456789XXXXefghij", context=3, minimum=2)
+   == [(10, "abcd", "XXXX", "789", "efg")], "differences are listed with what was meant, what was heard and context")
 _kana = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモ" * 4
 ok(pn.kana_sequence_scores(_kana, _kana[:300] + _kana[350:])[0] > 0.85, "a long note survives a 50-character gap by similarity")
 

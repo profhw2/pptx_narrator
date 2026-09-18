@@ -1100,6 +1100,18 @@ def normalize_for_comparison(text):
     """NFKC, case folding, and removal of punctuation, symbols and whitespace."""
     return _NON_WORD_RE.sub("", unicodedata.normalize("NFKC", text).casefold())
 
+def difference_list(a, b, context=8, minimum=1):
+    """The places where two sequences differ: (position, intended, recognized, before, after).
+
+    This is what a reader of the report actually works with: the fragment that was meant
+    and the fragment the ASR heard, in the order they occur, with a little context."""
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag != "equal" and max(i2 - i1, j2 - j1) >= minimum:
+            out.append((i1, a[i1:i2], b[j1:j2], a[max(0, i1 - context):i1], a[i2:i2 + context]))
+    return out
+
+
 def difference_runs(a, b):
     """(number of differing stretches, characters in the longest one) for two sequences.
 
@@ -1121,7 +1133,7 @@ def text_scores(text_intended, text_asr):
 
 def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
                        asr_model_size="small", asr_device="cpu", threshold=0.85,
-                       cer_threshold=None, max_difference=40):
+                       cer_threshold=None, max_difference=40, min_difference=4):
     logger.info("--- [Option: Verify] ASR round-trip check ---")
     is_ja = base_lang(lang) == "ja"
     try:
@@ -1135,7 +1147,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     logger.info(f"Loading Whisper model ({asr_model_size}, device={asr_device})...")
     asr_model = WhisperModel(asr_model_size, device=asr_device, compute_type="int8")
 
-    results = []
+    results, differences = [], []
     for slide_num in requested_slides:
         audio_p = os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label))
         spoken_p = os.path.join(workspace_dir, spoken_filename(slide_num, lang, model_label))
@@ -1170,6 +1182,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         status = "ENGLISH" if has_latin else ("FLAGGED" if failed else "OK")
 
         n_runs, worst_run = difference_runs(norm_intended, norm_asr)
+        for pos, said, heard, before, after in difference_list(norm_intended, norm_asr, minimum=min_difference):
+            differences.append((slide_num, max(len(said), len(heard)), pos, said, heard, before, after))
         long_difference = max_difference is not None and worst_run > max_difference
         results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
                         intended_text, asr_text, norm_intended, norm_asr))
@@ -1199,6 +1213,16 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     if n_latin:
         logger.info(f"{n_latin} slide(s) contain un-converted Latin-script words and need a listen.")
     logger.info(f"Report saved to: {report_p} (sorted worst-first)")
+
+    if differences:
+        diff_p = os.path.join(workspace_dir, f"verify_differences{lang_suffix(lang)}.{model_label}.csv")
+        with open(diff_p, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide", "length", "position", "intended", "recognized", "before", "after"])
+            for row in sorted(differences, key=lambda r: (-r[1], r[0], r[2])):
+                w.writerow(row)
+        logger.info(f"{len(differences)} difference(s) of at least {min_difference} characters listed in: {diff_p} "
+                    "(longest first)")
 
 _P14_MEDIA_RE = re.compile(r'<(p14:media)\b([^>]*?)(/?)>(?:(.*?)</p14:media>)?', re.DOTALL)
 _P14_PLAYBACK_CHILD_RE = re.compile(
@@ -1748,6 +1772,9 @@ def build_parser():
     _add(g_ver, "--asr-device", dest="asr_device", default="cpu", help="Device for the ASR model: cpu/cuda (default: cpu)")
     _add(g_ver, "--verify-threshold", dest="verify_threshold", type=float, default=0.85,
          help="Flag a slide when similarity (0-1) is below this value (default: 0.85)")
+    _add(g_ver, "--min-difference", dest="min_difference", type=int, default=4,
+         help="Shortest difference to list in verify_differences...csv (default: 4\n"
+              "characters); the list is what says where narration and text disagree")
     _add(g_ver, "--max-difference", dest="max_difference", type=int, default=40,
          help="Flag a slide when the narration and the transcript differ over a single\n"
               "stretch longer than this many characters, whatever the slide's length\n"
@@ -1870,7 +1897,8 @@ def main(argv=None):
     if args.verify:
         step_verify_audio(workspace_dir, req_slides, lang, model_label,
                           args.asr_model, args.asr_device, args.verify_threshold, args.cer_threshold,
-                          max_difference=args.max_difference or None)
+                          max_difference=args.max_difference or None,
+                          min_difference=args.min_difference)
     if args.pack:
         step_pack_pptx(
             args.pptx, args.out, workspace_dir, req_slides, lang, model_label,
