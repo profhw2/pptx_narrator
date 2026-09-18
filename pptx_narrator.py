@@ -1121,7 +1121,7 @@ def text_scores(text_intended, text_asr):
 
 def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
                        asr_model_size="small", asr_device="cpu", threshold=0.85,
-                       cer_threshold=None):
+                       cer_threshold=None, max_difference=40):
     logger.info("--- [Option: Verify] ASR round-trip check ---")
     is_ja = base_lang(lang) == "ja"
     try:
@@ -1165,10 +1165,12 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
 
         # Latin-script words left in Japanese narration cannot be compared reliably as kana
         has_latin = is_ja and bool(re.search(r'[A-Za-z]{2,}', intended_text))
-        failed = score < threshold or (cer_threshold is not None and cer > cer_threshold)
+        failed = (score < threshold or long_difference
+                  or (cer_threshold is not None and cer > cer_threshold))
         status = "ENGLISH" if has_latin else ("FLAGGED" if failed else "OK")
 
         n_runs, worst_run = difference_runs(norm_intended, norm_asr)
+        long_difference = max_difference is not None and worst_run > max_difference
         results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
                         intended_text, asr_text, norm_intended, norm_asr))
         logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
@@ -1189,6 +1191,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     n_flagged = sum(1 for r in results if r[3] == "FLAGGED")
     n_latin = sum(1 for r in results if r[3] == "ENGLISH")
     criterion = f"similarity < {threshold}"
+    if max_difference is not None:
+        criterion += f", a difference longer than {max_difference} characters"
     if cer_threshold is not None:
         criterion += f" or CER > {cer_threshold}"
     logger.info(f"Done: {n_flagged}/{len(results)} slide(s) flagged for review ({criterion}).")
@@ -1744,6 +1748,11 @@ def build_parser():
     _add(g_ver, "--asr-device", dest="asr_device", default="cpu", help="Device for the ASR model: cpu/cuda (default: cpu)")
     _add(g_ver, "--verify-threshold", dest="verify_threshold", type=float, default=0.85,
          help="Flag a slide when similarity (0-1) is below this value (default: 0.85)")
+    _add(g_ver, "--max-difference", dest="max_difference", type=int, default=40,
+         help="Flag a slide when the narration and the transcript differ over a single\n"
+              "stretch longer than this many characters, whatever the slide's length\n"
+              "(default: 40; 0 turns it off). A dropped phrase makes one long stretch,\n"
+              "while recognition differences are short and scattered")
     _add(g_ver, "--cer-threshold", dest="cer_threshold", type=float, default=None,
          help="Additionally flag a slide when CER exceeds this value (default: not used)")
 
@@ -1860,7 +1869,8 @@ def main(argv=None):
             )
     if args.verify:
         step_verify_audio(workspace_dir, req_slides, lang, model_label,
-                          args.asr_model, args.asr_device, args.verify_threshold, args.cer_threshold)
+                          args.asr_model, args.asr_device, args.verify_threshold, args.cer_threshold,
+                          max_difference=args.max_difference or None)
     if args.pack:
         step_pack_pptx(
             args.pptx, args.out, workspace_dir, req_slides, lang, model_label,
