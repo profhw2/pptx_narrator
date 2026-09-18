@@ -605,20 +605,19 @@ DICT_HEADER = ["string", "replacement", "type"]
 _HEADER_NAMES = {"string", "term", "replacement", "reading", "type"}
 
 
-COMMENT_MARKERS = (";", "#")
+COMMENT_MARKER = ";"
 
 
 def _strip_dictionary_comment(line):
-    """Drop a ';' or '#' comment from a dictionary line.
+    """Drop a ';' comment from a dictionary line.
 
-    A marker starts a comment only where a comment can plausibly begin: at the start of
-    the line or after a space. A marker inside a term ("C#") or inside double quotes
-    ("#1") is therefore kept."""
+    The marker starts a comment only at the start of the line or after a space, and not
+    inside double quotes, so a term that contains or begins with ';' is still possible."""
     in_quotes = False
     for i, ch in enumerate(line):
         if ch == '"':
             in_quotes = not in_quotes
-        elif ch in COMMENT_MARKERS and not in_quotes and (i == 0 or line[i - 1].isspace()):
+        elif ch == COMMENT_MARKER and not in_quotes and (i == 0 or line[i - 1].isspace()):
             return line[:i].strip()
     return line.strip()
 

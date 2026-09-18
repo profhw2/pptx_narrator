@@ -1,6 +1,6 @@
 ; Readings used for the author's molecular-biology lectures (Japanese narration).
-; string,replacement,type - a ';' (or '#') at the start of a line or after a space
-; starts a comment, so an entry can be annotated or switched off without deleting it.
+; string,replacement,type - a ';' at the start of a line or after a space starts a
+; comment, so an entry can be annotated or switched off without deleting it.
 string,replacement,type
 14N,じゅうよんエヌ,
 2ビット,にビット,

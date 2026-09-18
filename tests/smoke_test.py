@@ -198,13 +198,13 @@ ok(pn.apply_dictionary("5\u2019末端と5\u2032末端", [("5'", "ごだっしゅ
    "typographic apostrophes and primes match a plain dictionary entry")
 
 cmt = os.path.join(d, "commented.csv")
-write(cmt, "; readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,   ; only in the first slide\n;PCR,ピーシーアール,\nGbp,ギガベースペア,unit\n   # indented\n")
+write(cmt, "; readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,   ; only in the first slide\n;PCR,ピーシーアール,\nGbp,ギガベースペア,unit\n   ; indented\n")
 ok(pn.read_dictionary_file(cmt, "ja") == [("DNA", "ディーエヌエー", ""), ("Gbp", "ギガベースペア", "unit")],
-   "# starts a comment anywhere in a dictionary line")
+   "; starts a comment anywhere in a dictionary line")
 quoted = os.path.join(d, "quoted.csv")
-write(quoted, '"#1",ナンバーワン,  # a label in the figure\nC#,シーシャープ,\n# C,シー,\n')
+write(quoted, '"#1",ナンバーワン,  ; a label in the figure\nC#,シーシャープ,\n; C,シー,\n')
 ok([t for t, _, _ in pn.read_dictionary_file(quoted, "ja")] == ["#1", "C#"],
-   "a # inside a term is kept; a comment starts at the line start or after a space")
+   "a # inside a term is kept now that only ; starts a comment")
 
 ok(pn.difference_runs("abcdefghij", "abXXXXghij") == (1, 4) and pn.difference_runs("abc", "abc") == (0, 0),
    "difference runs count the places that differ and the longest one")
