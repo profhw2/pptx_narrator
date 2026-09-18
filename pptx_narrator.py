@@ -348,34 +348,6 @@ def _is_single_letter(term):
     return bool(re.fullmatch(r'[A-Za-z0-9]', term.strip()))
 
 
-_KANJI_RUN_RE = re.compile(r'[一-鿿々]{2,}')
-
-
-def uncertain_japanese_words(text, minimum=2):
-    """Japanese compounds whose reading is not settled, with the reading a front end gives them.
-
-    A compound the Japanese front end has to assemble from separate words (二|本|鎖) is where
-    readings go wrong: 鎖 is read クサリ on its own but サ in 二本鎖. Such compounds are worth a
-    dictionary entry, and the assembled reading is shown so that it can be corrected or the
-    entry deleted. Returns {word: reading in katakana}.
-    """
-    try:
-        import pyopenjtalk
-    except ImportError:
-        return {}
-    out = {}
-    for word in set(_KANJI_RUN_RE.findall(text)):
-        if len(word) < minimum:
-            continue
-        try:
-            tokens = pyopenjtalk.run_frontend(word)
-        except Exception:
-            continue
-        if len(tokens) > 1:
-            out[word] = unicodedata.normalize("NFKC", pyopenjtalk.g2p(word, kana=True))
-    return out
-
-
 def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slides, target_lang,
                               source_lang="auto", for_translation=False):
     """Collect candidate terms and append them to the dictionary file of the run.
@@ -417,7 +389,6 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
 
     existing_terms = {t.lower() for t, _, _ in entries or []}
     candidates = {}  # term -> is narration text (reading candidate)
-    japanese_readings = {}  # compound -> the reading the Japanese front end assembles
     for p, file_lang in texts:
         with open(p, 'r', encoding='utf-8') as f:
             text = f.read()
@@ -455,15 +426,6 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
             candidates[term] = narration_text
             existing_terms.add(term_lower)
 
-        # Japanese compounds the front end has to assemble; the reading it gives them is the
-        # provisional replacement, to be corrected or deleted.
-        if narration_text and base_lang(file_lang) == "ja":
-            for word, reading in uncertain_japanese_words(text).items():
-                if word.lower() not in existing_terms:
-                    candidates[word] = True
-                    japanese_readings[word] = reading
-                    existing_terms.add(word.lower())
-
     if not candidates:
         logger.info("No new terms found.")
         return
@@ -498,8 +460,6 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
                         repl = guess if (guess != term and is_japanese(guess)) else ""
                     else:
                         repl = guess if guess.strip().lower() != term.lower() else ""
-            elif term in japanese_readings:
-                repl = japanese_readings[term]
             elif tgt_base == "ja" and is_japanese(term):
                 repl = term
         new_entries.append((term, repl))

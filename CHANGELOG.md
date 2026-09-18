@@ -21,7 +21,6 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - `examples/screening_check.py`, which injects narration errors of a known size into the intended text and reports how often the ASR check notices them, by error size and note length.
 - `examples/readings_ja_molbio.csv`, a working reading dictionary from the author's molecular-biology lectures.
 - In a dictionary, a `#` at the start of a line or after a space starts a comment that runs to the end of the line, for annotating an entry or switching it off; a line that is only a comment is skipped. A `#` inside a term (`C#`, or `"#1"` in quotes) is kept.
-- `--scan` proposes, for Japanese narration, the kanji compounds that the Japanese front end assembles from separate words, together with the reading that assembly gives them; these are the words whose readings are unsettled and that otherwise have to be found by listening.
 - `--scan` no longer proposes single letters or digits, which have no useful reading of their own.
 - Typographic apostrophes, primes, quotation marks and dashes in the notes (e.g. the ’ PowerPoint inserts, or ′ pasted from a paper) match a dictionary entry written with the plain ASCII character, so an entry such as `5',ごだっしゅ` applies to all of its shapes.
 - Dictionary entries containing a backslash are reported, because they are matched literally and usually come from shell escaping.
