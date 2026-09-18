@@ -17,6 +17,7 @@ ASR model is loaded (--report to give another one). The workspace is not modifie
 """
 import argparse
 import csv
+import difflib
 import os
 import random
 import re
@@ -83,21 +84,36 @@ def main():
         pn.step_verify_audio(ws, slides, lang, label, args.asr_model, args.asr_device, args.threshold)
     asr = transcripts_from_report(report)
 
-    scores = pn.kana_scores if pn.base_lang(lang) == "ja" else pn.text_scores
-    intended = {}
+    # The comparison works on normalized sequences (katakana for Japanese), and the audio
+    # never changes, so each text is converted once and every trial is then a string operation.
+    is_ja = pn.base_lang(lang) == "ja"
+    if is_ja:
+        import pyopenjtalk
+
+        def normalize(text):
+            return pn._KANA_PUNCT_RE.sub("", pyopenjtalk.g2p(text, kana=True))
+    else:
+        normalize = pn.normalize_for_comparison
+
+    intended, hypothesis = {}, {}
     for n in sorted(asr):
         p = os.path.join(ws, pn.spoken_filename(n, lang, label))
         if os.path.exists(p):
             text = open(p, encoding="utf-8").read().strip()
             if text:
-                intended[n] = text
+                intended[n] = normalize(text)
+                hypothesis[n] = normalize(asr[n])
     if not intended:
         sys.exit("no spoken-text files found next to the report")
 
-    baseline = {n: scores(intended[n], asr[n])[0] for n in intended}
+    def similarity(ref, hyp):
+        return difflib.SequenceMatcher(None, ref, hyp, autojunk=False).ratio()
+
+    baseline = {n: similarity(intended[n], hypothesis[n]) for n in intended}
     below = [n for n, s in baseline.items() if s < args.threshold]
-    print(f"{len(intended)} slides, note length {min(len(t) for t in intended.values())}-"
-          f"{max(len(t) for t in intended.values())} characters")
+    print(f"{len(intended)} slides, {min(len(t) for t in intended.values())}-"
+          f"{max(len(t) for t in intended.values())} characters of narration each "
+          f"(as compared: {'katakana' if is_ja else 'normalized text'})")
     print(f"without any injected error, {len(below)} slide(s) score below {args.threshold}"
           + (f": {below}" if below else ""))
 
@@ -117,7 +133,7 @@ def main():
                     altered = fn(text, size, rng)
                     if altered is None:
                         continue
-                    s = scores(altered, asr[n])[0]
+                    s = similarity(altered, hypothesis[n])
                     trials.append(dict(slide=n, note_length=len(text), size=size, kind=kind,
                                        similarity=round(s, 4), baseline=round(baseline[n], 4),
                                        drop=round(baseline[n] - s, 4), detected=s < args.threshold))

@@ -201,7 +201,7 @@ The report is a listening aid, not a pass/fail test: high similarity usually mea
 
 ## Checking the ASR screening
 
-`examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the intended text of each slide -- a run of characters deleted, as when a phrase is skipped, or replaced by other words, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note:
+`examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the sequence the check compares (katakana for Japanese, normalized text otherwise) -- a run of characters deleted, as when a phrase is skipped, or replaced by other characters, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note. Sizes are in characters of that sequence, so 3 characters is about one short term and 50 is about one sentence:
 
 ```bash
 python examples/screening_check.py --workspace ws --target-lang ja --asr-model small --asr-device cuda
