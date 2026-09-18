@@ -1177,7 +1177,7 @@ RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "even
 
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
                    source_lang="auto", writeback_notes=False, use_spoken_notes=False,
-                   remove_recorded=("pointer", "events"), icon_outside=True):
+                   remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
     prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
@@ -1230,7 +1230,8 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             if os.path.exists(m4a_p) and s_num <= len(slide_parts):
                 embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
                                       slide_w, slide_h, slide_part=slide_parts[s_num - 1],
-                                      remove_recorded=remove_recorded, icon_outside=icon_outside)
+                                      remove_recorded=remove_recorded, icon_outside=icon_outside,
+                                      pause_ms=pause_ms)
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
@@ -1424,7 +1425,7 @@ def _set_picture_offset(pic_xml, x, y):
 
 
 def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, slide_h=6858000, slide_part=None,
-                          remove_recorded=("pointer", "events"), icon_outside=True):
+                          remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
     """Put the narration audio into slide s_num of an unzipped PPTX package.
 
     Each slide gets its own media file, so slides that shared one audio clip (e.g. copied
@@ -1511,12 +1512,12 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
             f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
         )
         slide_xml = slide_xml.replace("</p:spTree>", pic_xml + "</p:spTree>", 1)
-        slide_xml = _set_advance_time(slide_xml, dur_ms)
+        slide_xml = _set_advance_time(slide_xml, dur_ms + pause_ms)
         slide_xml = _insert_after_transition_or_clrmap(slide_xml, _NARRATION_TIMING.replace("{spid}", str(spid)))
         status = "inserted"
 
     if status == "replaced":
-        slide_xml = _set_advance_time(slide_xml, dur_ms)
+        slide_xml = _set_advance_time(slide_xml, dur_ms + pause_ms)
     with open(slide_p, "w", encoding="utf-8") as f:
         f.write(slide_xml)
     os.makedirs(os.path.dirname(rels_p), exist_ok=True)
@@ -1698,6 +1699,9 @@ def build_parser():
               "by '=== pptx-narrator: ... ===' marker lines that --extract recognizes")
     _add(g_pack, "--use-spoken-notes", dest="use_spoken_notes", action="store_true",
          help="With --writeback-notes, write the dictionary-normalized reading text instead")
+    _add(g_pack, "--slide-pause", dest="slide_pause", type=float, default=1.0,
+         help="Seconds to wait after the narration before the slide advances by itself\n"
+              "(default: 1.0), so that the last word is not cut off in a video")
     _add(g_pack, "--keep-audio-icon", dest="keep_audio_icon", action="store_true",
          help="Leave the audio icon of a narrated slide where it is. By default the icon is\n"
               "parked next to the slide, outside the visible area, so that it does not cover\n"
@@ -1809,6 +1813,7 @@ def main(argv=None):
             writeback_notes=args.writeback_notes, use_spoken_notes=args.use_spoken_notes,
             remove_recorded=RECORDED_CHOICES[args.remove_recorded],
             icon_outside=not args.keep_audio_icon,
+            pause_ms=int(round(args.slide_pause * 1000)),
         )
 
 

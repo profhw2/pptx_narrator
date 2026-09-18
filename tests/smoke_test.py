@@ -264,8 +264,8 @@ for name in names:
         xml.dom.minidom.parseString(zo.read(name))
 ok(names[0] == "[Content_Types].xml", "packed file is a well-formed package")
 adv = {n: [int(a) for a in re.findall(r'advTm="(\d+)"', sx[n])] for n in (1, 2, 3)}
-ok(all(adv[n] and all(abs(a - dur) < 100 for a in adv[n]) for n, dur in [(1, 1800), (2, 2500), (3, 3200)]),
-   f"slide advance times set to the audio lengths {adv}")
+ok(all(adv[n] and all(abs(a - dur - 1000) < 100 for a in adv[n]) for n, dur in [(1, 1800), (2, 2500), (3, 3200)]),
+   f"slide advance times set to the audio length plus the pause {adv}")
 ok('<a:audioFile r:link=' in sx[1] and 'isNarration="1"' in sx[1] and "pptx_narrator_slide1.m4a" in rx[1]
    and re.search(r"</p:clrMapOvr><p:transition[^>]*/><p:timing>", sx[1]), "narration inserted into a slide without audio")
 ok("pptx_narrator_slide2.m4a" in rx[2] and "pptx_narrator_slide3.m4a" in rx[3] and "NULL" not in rx[3]
