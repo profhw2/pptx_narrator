@@ -1737,6 +1737,11 @@ def build_parser():
               "(default: --source-lang if given, otherwise en)")
 
     g_text = parser.add_argument_group("text normalization")
+    _add(g_text, "--scan-compounds", dest="scan_compounds", action="store_true",
+         help="With --scan and Japanese narration, also write the compounds of the notes,\n"
+              "with the reading a Japanese front end assembles for them, as comment lines in\n"
+              "the dictionary. They do nothing until the '#' is removed, so the list can be\n"
+              "long; it is where unsettled readings such as 二本鎖 show up")
     _add(g_text, "--dict-file", dest="dict_file", action="append", default=None,
          help="Dictionary CSV of string replacements (string,replacement,type), repeatable.\n"
               "Applied to the notes before --translate and to the narration text before --tts\n"
@@ -1876,7 +1881,8 @@ def main(argv=None):
         step_extract_notes(args.pptx, workspace_dir, req_slides, args.source_lang)
     if args.scan:
         step_scan_and_update_dict(workspace_dir, args.dict_file[0], dictionaries, req_slides, lang,
-                                  source_lang=args.source_lang, for_translation=args.translate)
+                                  source_lang=args.source_lang, for_translation=args.translate,
+                                  propose_compounds=args.scan_compounds)
     if args.translate:
         step_translate_notes(workspace_dir, req_slides, args.source_lang, lang,
                              dictionary=dictionaries, overwrite=args.retranslate)
