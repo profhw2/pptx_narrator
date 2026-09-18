@@ -1177,7 +1177,7 @@ RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "even
 
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
                    source_lang="auto", writeback_notes=False, use_spoken_notes=False,
-                   remove_recorded=("pointer", "events")):
+                   remove_recorded=("pointer", "events"), icon_outside=True):
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
     prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
@@ -1230,7 +1230,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             if os.path.exists(m4a_p) and s_num <= len(slide_parts):
                 embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
                                       slide_w, slide_h, slide_part=slide_parts[s_num - 1],
-                                      remove_recorded=remove_recorded)
+                                      remove_recorded=remove_recorded, icon_outside=icon_outside)
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
@@ -1408,8 +1408,23 @@ def remove_recorded_show_data(slide_xml, kinds=("pointer", "events")):
     return slide_xml, removed
 
 
+ICON_GAP = 228600  # 0.25 inch between the slide edge and the icon parked next to it
+
+
+def _picture_extent(pic_xml, default=812800):
+    m = re.search(r'<a:ext\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"', pic_xml)
+    return (int(m.group(1)), int(m.group(2))) if m else (default, default)
+
+
+def _set_picture_offset(pic_xml, x, y):
+    """Move a picture; returns the picture unchanged if it carries no position."""
+    if not re.search(r'<a:off\b', pic_xml):
+        return pic_xml
+    return re.sub(r'<a:off\b[^>]*/>', f'<a:off x="{x}" y="{y}"/>', pic_xml, count=1)
+
+
 def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, slide_h=6858000, slide_part=None,
-                          remove_recorded=("pointer", "events")):
+                          remove_recorded=("pointer", "events"), icon_outside=True):
     """Put the narration audio into slide s_num of an unzipped PPTX package.
 
     Each slide gets its own media file, so slides that shared one audio clip (e.g. copied
@@ -1458,6 +1473,13 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
         rel_ids |= set(re.findall(r'<p14:media\b[^>]*r:embed="([^"]+)"', pic))
         for rel_id in rel_ids:
             rels_xml = _set_rel_target(rels_xml, rel_id, target)
+        if icon_outside:
+            cx, cy = _picture_extent(pic)
+            moved = _set_picture_offset(pic, -(cx + ICON_GAP), 0)
+            if moved != pic:
+                slide_xml = slide_xml.replace(pic, moved, 1)
+                pic = moved
+                logger.info(f"Slide #{s_num}: moved the audio icon next to the slide, out of the visible area.")
         slide_xml, n_cleared = clear_media_playback_settings(slide_xml, rel_ids)
         if n_cleared:
             logger.info(f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
@@ -1476,7 +1498,10 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
         rels_xml, rid_icon = _add_rel(rels_xml, REL_IMAGE, f"../media/{NARRATION_ICON}")
         spid = max([int(i) for i in re.findall(r'<p:cNvPr\b[^>]*\bid="(\d+)"', slide_xml)] + [1]) + 1
         size = 812800
-        x, y = max(slide_w - size - 215900, 0), max(slide_h - size - 215900, 0)
+        if icon_outside:
+            x, y = -(size + ICON_GAP), 0
+        else:
+            x, y = max(slide_w - size - 215900, 0), max(slide_h - size - 215900, 0)
         pic_xml = (
             f'<p:pic><p:nvPicPr><p:cNvPr id="{spid}" name="Narration {spid}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/>'
             f'</p:cNvPicPr><p:nvPr><a:audioFile r:link="{rid_audio}"/><p:extLst><p:ext uri="{{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}}">'
@@ -1673,6 +1698,10 @@ def build_parser():
               "by '=== pptx-narrator: ... ===' marker lines that --extract recognizes")
     _add(g_pack, "--use-spoken-notes", dest="use_spoken_notes", action="store_true",
          help="With --writeback-notes, write the dictionary-normalized reading text instead")
+    _add(g_pack, "--keep-audio-icon", dest="keep_audio_icon", action="store_true",
+         help="Leave the audio icon of a narrated slide where it is. By default the icon is\n"
+              "parked next to the slide, outside the visible area, so that it does not cover\n"
+              "the slide content in the editor (it is hidden during the show either way)")
     _add(g_pack, "--remove-recorded", dest="remove_recorded", default="all",
          choices=["all", "pointer", "events", "none"],
          help="What to remove from a narrated slide of the data recorded with the previous\n"
@@ -1779,6 +1808,7 @@ def main(argv=None):
             source_lang=args.source_lang,
             writeback_notes=args.writeback_notes, use_spoken_notes=args.use_spoken_notes,
             remove_recorded=RECORDED_CHOICES[args.remove_recorded],
+            icon_outside=not args.keep_audio_icon,
         )
 
 

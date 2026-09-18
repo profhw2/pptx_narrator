@@ -271,6 +271,16 @@ ok('<a:audioFile r:link=' in sx[1] and 'isNarration="1"' in sx[1] and "pptx_narr
 ok("pptx_narrator_slide2.m4a" in rx[2] and "pptx_narrator_slide3.m4a" in rx[3] and "NULL" not in rx[3]
    and "ppt/media/media1.m4a" not in names, "copied slides get their own audio; the unused old clip is removed")
 ok("p14:trim" not in sx[2] and "p14:trim" not in sx[3] and sx[2].count("<p:pic>") == 1, "trim of the previous recording removed")
+offs = {n: re.findall(r'<a:off x="(-?\d+)" y="(-?\d+)"/>', sx[n]) for n in (1, 2, 3)}
+ok(all(any(int(x) < 0 for x, _ in offs[n]) for n in (1, 2, 3)),
+   f"audio icon parked outside the slide area {offs}")
+pkg2 = tempfile.mkdtemp()
+os.makedirs(os.path.join(pkg2, "ppt", "slides"))
+write(os.path.join(pkg2, "ppt", "slides", "slide1.xml"),
+      '<p:sld><p:cSld><p:spTree>' + audio_pic("rId91", "rId92", "") + '</p:spTree></p:cSld></p:sld>')
+pn.embed_slide_narration(pkg2, 1, os.path.join(d, "m.m4a"), 300, icon_outside=False)
+ok('<a:off x="0" y="0"/>' in read(os.path.join(pkg2, "ppt", "slides", "slide1.xml")),
+   "--keep-audio-icon leaves the icon where it is")
 ok(all("laserTraceLst" not in sx[n] and "showEvtLst" not in sx[n] for n in (2, 3)) and "creationId" in sx[2],
    "laser-pointer path and recorded playback events removed, other slide extensions kept")
 kept = pn.remove_recorded_show_data(open(os.path.join(d, "recorded.xml"), encoding="utf-8").read()

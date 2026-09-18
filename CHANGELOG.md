@@ -11,6 +11,7 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - Built-in SI-unit readings for Japanese narration, with an optional letter map for spelling out symbols.
 - `--verify` transcribes the narration with faster-whisper and reports similarity and character error rate (kana-based for Japanese) so that listening can focus on the flagged slides.
 - `--pack` embeds the audio in the structure PowerPoint writes for recorded narration, inserting a narration object where a slide has none, giving every slide its own media file, setting the slide advance time, and removing the settings of a previous recording (trim, fade, bookmarks, laser-pointer path, play/pause/seek events; `--remove-recorded`).
+- `--pack` parks the audio icon next to the slide, outside the visible area, so that it does not cover the slide content in the editor (`--keep-audio-icon` to switch this off).
 - `--writeback-notes` writes translated or spoken-form narration above the original note between `=== pptx-narrator: … ===` marker lines that `--extract` recognizes; `translations.json` records which source version each translation came from.
 - `--tts` reports the synthesis time per slide and a summary for the run.
 - `tests/smoke_test.py` covers the pipeline with the back-ends mocked.
