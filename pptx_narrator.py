@@ -1100,6 +1100,18 @@ def normalize_for_comparison(text):
     """NFKC, case folding, and removal of punctuation, symbols and whitespace."""
     return _NON_WORD_RE.sub("", unicodedata.normalize("NFKC", text).casefold())
 
+def difference_runs(a, b):
+    """(number of differing stretches, characters in the longest one) for two sequences.
+
+    The ratio-based scores say how much of a slide matched; these say how many places
+    differ and how long the longest difference is, which is what points at a skipped
+    phrase rather than at scattered recognition differences."""
+    runs = [max(i2 - i1, j2 - j1)
+            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+            if tag != "equal"]
+    return len(runs), max(runs, default=0)
+
+
 def text_scores(text_intended, text_asr):
     """Character-level similarity and CER on normalized text; return (similarity, CER, norm_intended, norm_asr)."""
     a = normalize_for_comparison(text_intended)
@@ -1156,9 +1168,11 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         failed = score < threshold or (cer_threshold is not None and cer > cer_threshold)
         status = "ENGLISH" if has_latin else ("FLAGGED" if failed else "OK")
 
-        results.append((slide_num, round(score, 4), round(cer, 4), status,
+        n_runs, worst_run = difference_runs(norm_intended, norm_asr)
+        results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
                         intended_text, asr_text, norm_intended, norm_asr))
-        logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f} [{status}]")
+        logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
+                    f"{n_runs} difference(s), longest {worst_run} characters [{status}]")
 
     if not results:
         logger.info("No slides with both audio and spoken-text files found -- nothing to verify.")
@@ -1167,8 +1181,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     report_p = os.path.join(workspace_dir, f"verify_report{lang_suffix(lang)}.{model_label}.csv")
     with open(report_p, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["slide", "similarity", "cer", "status", "intended_text", "asr_text",
-                    "intended_normalized", "asr_normalized"])
+        w.writerow(["slide", "similarity", "cer", "status", "differences", "longest_difference",
+                    "intended_text", "asr_text", "intended_normalized", "asr_normalized"])
         for row in sorted(results, key=lambda r: r[1]):
             w.writerow(row)
 

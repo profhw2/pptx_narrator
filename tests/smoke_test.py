@@ -206,6 +206,9 @@ write(quoted, '"#1",ナンバーワン,  # a label in the figure\nC#,シーシ�
 ok([t for t, _, _ in pn.read_dictionary_file(quoted, "ja")] == ["#1", "C#"],
    "a # inside a term is kept; a comment starts at the line start or after a space")
 
+ok(pn.difference_runs("abcdefghij", "abXXXXghij") == (1, 4) and pn.difference_runs("abc", "abc") == (0, 0),
+   "difference runs count the places that differ and the longest one")
+
 # ---------------------------------------------------------------- packing
 # Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;
 # slide 3 is a copy of slide 2 that shares its media file (its audio link is "NULL").

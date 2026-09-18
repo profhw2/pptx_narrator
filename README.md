@@ -190,7 +190,7 @@ Run `pptx-narrator --help` for details. Underscore spellings from v1.0 (`--dict_
 
 ### Verification report
 
-The report is a listening aid, not a pass/fail test: high similarity usually means the narration is fine, while many low-scoring slides sound natural and only reflect recognition errors. `verify_report<suffix>.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
+The report is a listening aid, not a pass/fail test: high similarity usually means the narration is fine, while many low-scoring slides sound natural and only reflect recognition errors. `verify_report<suffix>.<model>.csv` lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), `differences` and `longest_difference` (how many places differ and how long the longest stretch is, which is what distinguishes a skipped phrase from scattered recognition differences), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
 
 ## Limitations
 
