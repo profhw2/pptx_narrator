@@ -517,11 +517,11 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
                         proposals[word] = reading
         if proposals:
             with open(dict_path, "a", encoding="utf-8", newline="") as f:
-                f.write("\n# Compounds of the notes with the reading a Japanese front end assembles for them.\n"
-                        "# They are comments, so they do nothing until the '#' is removed; correct the reading\n"
-                        "# first (鎖 is read クサリ on its own but サ in 二本鎖) or leave the line as it is.\n")
+                f.write("\n; Compounds of the notes with the reading a Japanese front end assembles for them.\n"
+                        "; They are comments, so they do nothing until the ';' is removed; correct the reading\n"
+                        "; first (鎖 is read クサリ on its own but サ in 二本鎖) or leave the line as it is.\n")
                 for word in sorted(proposals):
-                    f.write(f"#{word},{proposals[word]},\n")
+                    f.write(f";{word},{proposals[word]},\n")
             logger.info(f"{len(proposals)} compound(s) proposed as comment lines in {dict_path}")
     logger.info(f"Added {len(new_entries)} entries to {dict_path}")
 
@@ -605,17 +605,20 @@ DICT_HEADER = ["string", "replacement", "type"]
 _HEADER_NAMES = {"string", "term", "replacement", "reading", "type"}
 
 
-def _strip_dictionary_comment(line):
-    """Drop a '#' comment from a dictionary line.
+COMMENT_MARKERS = (";", "#")
 
-    A '#' starts a comment only where a comment can plausibly begin: at the start of the
-    line or after a space. A '#' inside a term ("C#") or inside double quotes ("#1") is
-    therefore kept."""
+
+def _strip_dictionary_comment(line):
+    """Drop a ';' or '#' comment from a dictionary line.
+
+    A marker starts a comment only where a comment can plausibly begin: at the start of
+    the line or after a space. A marker inside a term ("C#") or inside double quotes
+    ("#1") is therefore kept."""
     in_quotes = False
     for i, ch in enumerate(line):
         if ch == '"':
             in_quotes = not in_quotes
-        elif ch == "#" and not in_quotes and (i == 0 or line[i - 1].isspace()):
+        elif ch in COMMENT_MARKERS and not in_quotes and (i == 0 or line[i - 1].isspace()):
             return line[:i].strip()
     return line.strip()
 

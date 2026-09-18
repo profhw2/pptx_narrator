@@ -198,7 +198,7 @@ ok(pn.apply_dictionary("5\u2019末端と5\u2032末端", [("5'", "ごだっしゅ
    "typographic apostrophes and primes match a plain dictionary entry")
 
 cmt = os.path.join(d, "commented.csv")
-write(cmt, "# readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,   # only in the first slide\n#PCR,ピーシーアール,\nGbp,ギガベースペア,unit\n   # indented\n")
+write(cmt, "; readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,   ; only in the first slide\n;PCR,ピーシーアール,\nGbp,ギガベースペア,unit\n   # indented\n")
 ok(pn.read_dictionary_file(cmt, "ja") == [("DNA", "ディーエヌエー", ""), ("Gbp", "ギガベースペア", "unit")],
    "# starts a comment anywhere in a dictionary line")
 quoted = os.path.join(d, "quoted.csv")
