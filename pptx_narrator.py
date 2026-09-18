@@ -549,12 +549,16 @@ _HEADER_NAMES = {"string", "term", "replacement", "reading", "type"}
 
 
 def _strip_dictionary_comment(line):
-    """Drop a trailing '#' comment, keeping a '#' that is inside double quotes."""
+    """Drop a '#' comment from a dictionary line.
+
+    A '#' starts a comment only where a comment can plausibly begin: at the start of the
+    line or after a space. A '#' inside a term ("C#") or inside double quotes ("#1") is
+    therefore kept."""
     in_quotes = False
     for i, ch in enumerate(line):
         if ch == '"':
             in_quotes = not in_quotes
-        elif ch == "#" and not in_quotes:
+        elif ch == "#" and not in_quotes and (i == 0 or line[i - 1].isspace()):
             return line[:i].strip()
     return line.strip()
 
