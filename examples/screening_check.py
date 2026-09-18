@@ -29,19 +29,26 @@ import pptx_narrator as pn  # noqa: E402
 FILLER = "それからこの場合においてもおよそ同じように考えることができるという点がここでは重要になります"
 
 
-def delete_run(text, size, rng):
+def _position(spans, size, rng):
+    """A starting point inside a stretch that already matches the transcript."""
+    usable = [(a, b) for a, b in spans if b - a >= size]
+    if not usable:
+        return None
+    a, b = usable[rng.randrange(len(usable))]
+    return rng.randrange(a, b - size + 1)
+
+
+def delete_run(text, size, rng, spans):
     """Drop `size` characters, as when a phrase is skipped."""
-    if len(text) <= size + 10:
-        return None
-    i = rng.randrange(0, len(text) - size)
-    return text[:i] + text[i + size:]
+    i = _position(spans, size, rng)
+    return None if i is None else text[:i] + text[i + size:]
 
 
-def replace_run(text, size, rng):
-    """Replace `size` characters with other words, as when a term is misread."""
-    if len(text) <= size + 10:
+def replace_run(text, size, rng, spans):
+    """Replace `size` characters with other characters, as when a term is misread."""
+    i = _position(spans, size, rng)
+    if i is None:
         return None
-    i = rng.randrange(0, len(text) - size)
     filler = (FILLER * (size // len(FILLER) + 1))[:size]
     return text[:i] + filler + text[i + size:]
 
@@ -112,7 +119,16 @@ def main():
     def longest_run(ref, hyp):
         return pn.difference_runs(ref, hyp)[1]
 
+    def matching_spans(ref, hyp):
+        """Stretches of the intended text that the transcript already agrees with.
+
+        Injecting the error there keeps it separate from the places where text and
+        transcript differ anyway, so what is measured is the error and nothing else."""
+        return [(i, i + n) for i, _, n in difflib.SequenceMatcher(None, ref, hyp, autojunk=False)
+                .get_matching_blocks() if n]
+
     baseline = {n: similarity(intended[n], hypothesis[n]) for n in intended}
+    spans = {n: matching_spans(intended[n], hypothesis[n]) for n in intended}
     below = [n for n, s in baseline.items() if s < args.threshold]
     print(f"{len(intended)} slides, {min(len(t) for t in intended.values())}-"
           f"{max(len(t) for t in intended.values())} characters of narration each "
@@ -120,8 +136,11 @@ def main():
     print(f"without any injected error, {len(below)} slide(s) score below {args.threshold}"
           + (f": {below}" if below else ""))
     noise = sorted(longest_run(intended[n], hypothesis[n]) for n in intended)
-    print(f"longest difference without any injected error: median {noise[len(noise) // 2]}, "
-          f"worst {noise[-1]} characters -- the recognition noise a length-independent rule must clear")
+    disagreement = sorted(round((1 - baseline[n]) * len(intended[n])) for n in intended)
+    print(f"without any injected error, text and transcript already disagree over "
+          f"{disagreement[len(disagreement) // 2]} characters in the median slide (up to {disagreement[-1]}), "
+          f"in stretches of at most {noise[len(noise) // 2]} characters (worst {noise[-1]}); "
+          "errors are injected only where they agree")
 
     for n in below:  # a slide already below the threshold would "detect" everything
         intended.pop(n, None)
@@ -136,7 +155,7 @@ def main():
         for size in sizes:
             for kind, fn in KINDS.items():
                 for _ in range(args.repeats):
-                    altered = fn(text, size, rng)
+                    altered = fn(text, size, rng, spans[n])
                     if altered is None:
                         continue
                     s = similarity(altered, hypothesis[n])
