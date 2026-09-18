@@ -201,6 +201,9 @@ cmt = os.path.join(d, "commented.csv")
 write(cmt, "# readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,   # only in the first slide\n#PCR,ピーシーアール,\nGbp,ギガベースペア,unit\n   # indented\n")
 ok(pn.read_dictionary_file(cmt, "ja") == [("DNA", "ディーエヌエー", ""), ("Gbp", "ギガベースペア", "unit")],
    "# starts a comment anywhere in a dictionary line")
+quoted = os.path.join(d, "quoted.csv")
+write(quoted, '"#1",ナンバーワン,  # a label in the figure\n"C#",シーシャープ,\n')
+ok([t for t, _, _ in pn.read_dictionary_file(quoted, "ja")] == ["#1", "C#"], "a quoted # is part of the term")
 
 # ---------------------------------------------------------------- packing
 # Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;

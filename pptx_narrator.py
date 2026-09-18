@@ -548,12 +548,24 @@ DICT_HEADER = ["string", "replacement", "type"]
 _HEADER_NAMES = {"string", "term", "replacement", "reading", "type"}
 
 
+def _strip_dictionary_comment(line):
+    """Drop a trailing '#' comment, keeping a '#' that is inside double quotes."""
+    in_quotes = False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == "#" and not in_quotes:
+            return line[:i].strip()
+    return line.strip()
+
+
 def read_dictionary_file(path, lang=None):
     """Return [(string, replacement, type)] from one dictionary CSV."""
     with open(path, 'r', encoding='utf-8', newline='') as f:
         # Everything from a '#' to the end of the line is a comment, so a line can explain or
-        # switch off an entry; a line with nothing left in front of the '#' is skipped.
-        lines = [line.split("#", 1)[0].strip() for line in f]
+        # switch off an entry; a line with nothing left in front of the '#' is skipped. A '#'
+        # inside double quotes is part of the term (e.g. "#1").
+        lines = [_strip_dictionary_comment(line) for line in f]
         rows = [r for r in csv.reader([ln for ln in lines if ln]) if any(c.strip() for c in r)]
     if not rows:
         return []
