@@ -109,6 +109,9 @@ def main():
     def similarity(ref, hyp):
         return difflib.SequenceMatcher(None, ref, hyp, autojunk=False).ratio()
 
+    def longest_run(ref, hyp):
+        return pn.difference_runs(ref, hyp)[1]
+
     baseline = {n: similarity(intended[n], hypothesis[n]) for n in intended}
     below = [n for n, s in baseline.items() if s < args.threshold]
     print(f"{len(intended)} slides, {min(len(t) for t in intended.values())}-"
@@ -116,6 +119,9 @@ def main():
           f"(as compared: {'katakana' if is_ja else 'normalized text'})")
     print(f"without any injected error, {len(below)} slide(s) score below {args.threshold}"
           + (f": {below}" if below else ""))
+    noise = sorted(longest_run(intended[n], hypothesis[n]) for n in intended)
+    print(f"longest difference without any injected error: median {noise[len(noise) // 2]}, "
+          f"worst {noise[-1]} characters -- the recognition noise a length-independent rule must clear")
 
     for n in below:  # a slide already below the threshold would "detect" everything
         intended.pop(n, None)
@@ -136,7 +142,8 @@ def main():
                     s = similarity(altered, hypothesis[n])
                     trials.append(dict(slide=n, note_length=len(text), size=size, kind=kind,
                                        similarity=round(s, 4), baseline=round(baseline[n], 4),
-                                       drop=round(baseline[n] - s, 4), detected=s < args.threshold))
+                                       drop=round(baseline[n] - s, 4), detected=s < args.threshold,
+                                       longest_difference=longest_run(altered, hypothesis[n])))
 
     def rate(rows):
         return f"{sum(r['detected'] for r in rows):>4}/{len(rows):<4}" if rows else "   -    "
@@ -151,6 +158,18 @@ def main():
     for kind in KINDS:
         rows = [t for t in trials if t["kind"] == kind]
         print(f"{kind:>10}: {rate(rows)}")
+    run_threshold = max(noise) + 1
+    print(f"\nthe same trials judged by the longest difference instead (more than {run_threshold} characters, "
+          f"which no unaltered slide reaches):")
+    print(f"{'error':>7} | " + " | ".join(f"{lo}-{hi if hi < 10**9 else ''} chars".rjust(16) for lo, hi in buckets)
+          + " |         all")
+    for size in sizes:
+        row = [t for t in trials if t["size"] == size]
+        cells = [f"{sum(t['longest_difference'] > run_threshold for t in row if lo <= t['note_length'] < hi):>4}/"
+                 f"{len([t for t in row if lo <= t['note_length'] < hi]):<4}" for lo, hi in buckets]
+        hit = sum(t["longest_difference"] > run_threshold for t in row)
+        print(f"{size:>5} c | " + " | ".join(c.rjust(16) for c in cells) + f" | {hit:>4}/{len(row):<4}")
+
     print("\nmedian fall in similarity caused by the error:")
     for size in sizes:
         drops = sorted(t["drop"] for t in trials if t["size"] == size)
