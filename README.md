@@ -179,6 +179,7 @@ Keep the marker lines when editing such notes in PowerPoint. When `--extract` fi
 | `--enable-drc`, `--drc-threshold`, `--drc-ratio` | Dynamic range compression of the output |
 | `--asr-model`, `--asr-device` | faster-whisper model size and device |
 | `--verify-threshold` | Flag slides with similarity below this value (default: 0.85) |
+| `--max-difference` | Flag a slide when one stretch of the narration differs from the transcript over more than this many characters (default: 40; `0` disables) |
 | `--cer-threshold` | Also flag slides with CER above this value (default: off) |
 | `--out` | Output deck for `--pack` (default: `output.pptx`) |
 | `--writeback-notes`, `--use-spoken-notes` | Write the narration (or its rewritten form) into the notes on `--pack` |
