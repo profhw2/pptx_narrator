@@ -551,7 +551,8 @@ _HEADER_NAMES = {"string", "term", "replacement", "reading", "type"}
 def read_dictionary_file(path, lang=None):
     """Return [(string, replacement, type)] from one dictionary CSV."""
     with open(path, 'r', encoding='utf-8', newline='') as f:
-        rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
+        rows = [r for r in csv.reader(f)
+                if any(c.strip() for c in r) and not r[0].lstrip().startswith("#")]
     if not rows:
         return []
     head = [c.strip().lower() for c in rows[0]]

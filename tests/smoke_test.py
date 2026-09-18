@@ -197,6 +197,10 @@ ok([round(x, 3) if isinstance(x, float) else x for x in pn.kana_scores("今日�
 ok(pn.apply_dictionary("5\u2019末端と5\u2032末端", [("5'", "ごだっしゅ", "")], "ja") == "ごだっしゅ末端とごだっしゅ末端",
    "typographic apostrophes and primes match a plain dictionary entry")
 
+cmt = os.path.join(d, "commented.csv")
+write(cmt, "# readings for the DNA lecture\nstring,replacement,type\nDNA,ディーエヌエー,\n# disabled for now:\n#PCR,ピーシーアール,\n")
+ok([t for t, _, _ in pn.read_dictionary_file(cmt, "ja")] == ["DNA"], "# lines in a dictionary are comments")
+
 # ---------------------------------------------------------------- packing
 # Deck as PowerPoint writes it: slide 1 has no audio; slide 2 has a recorded narration with trim;
 # slide 3 is a copy of slide 2 that shares its media file (its audio link is "NULL").
