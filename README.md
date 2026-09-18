@@ -207,7 +207,7 @@ The report is a listening aid, not a pass/fail test: high similarity usually mea
 python examples/screening_check.py --workspace ws --target-lang ja --asr-model small --asr-device cuda
 ```
 
-The original workspace is not modified. `--dry-run` shows the alterations without running the ASR.
+The original workspace is not modified. `--dry-run` shows the alterations without running the ASR, and `--perturb N` sets how many slides to alter (slides whose text is too short to alter are skipped). If faster-whisper cannot load the CUDA libraries (`libcublas.so.12 is not found`), run the check with `--asr-device cpu` or install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.
 
 ## Tests
 

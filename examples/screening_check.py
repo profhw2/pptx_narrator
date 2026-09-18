@@ -97,27 +97,31 @@ def main():
 
     rng = random.Random(args.seed)
     n_perturb = args.perturb if args.perturb is not None else max(1, len(slides) // 2)
-    chosen = sorted(rng.sample(slides, min(n_perturb, len(slides))))
+    texts = {n: open(os.path.join(ws, pn.spoken_filename(n, lang, label)), encoding="utf-8").read().strip()
+             for n in slides}
+
+    # Alter as many slides as asked for, skipping those whose text is too short to alter.
+    altered, new_texts = {}, {}
+    for n in rng.sample(slides, len(slides)):
+        if len(altered) >= n_perturb:
+            break
+        for fn in rng.sample(PERTURBATIONS, len(PERTURBATIONS)):
+            candidate, what = fn(texts[n], rng)
+            if candidate and candidate != texts[n]:
+                altered[n], new_texts[n] = what, candidate
+                break
+    too_short = [n for n in slides if n not in altered and len(texts[n]) < 40]
 
     out = os.path.abspath(ws.rstrip("/") + "_screening")
     os.makedirs(out, exist_ok=True)
-    altered = {}
     for n in slides:
         audio = pn.audio_filename(n, lang, label)
-        spoken = pn.spoken_filename(n, lang, label)
         shutil.copy(os.path.join(ws, audio), os.path.join(out, audio))
-        text = open(os.path.join(ws, spoken), encoding="utf-8").read().strip()
-        if n in chosen:
-            for fn in rng.sample(PERTURBATIONS, len(PERTURBATIONS)):
-                new_text, what = fn(text, rng)
-                if new_text and new_text != text:
-                    altered[n], text = what, new_text
-                    break
-            else:
-                print(f"slide {n}: could not be altered (text too short); kept as it is")
-        open(os.path.join(out, spoken), "w", encoding="utf-8").write(text)
+        open(os.path.join(out, pn.spoken_filename(n, lang, label)), "w", encoding="utf-8").write(
+            new_texts.get(n, texts[n]))
 
-    print(f"{len(slides)} slides, {len(altered)} of them altered:")
+    print(f"{len(slides)} slides, {len(altered)} of them altered"
+          + (f" ({len(too_short)} too short to alter)" if too_short else "") + ":")
     for n, what in sorted(altered.items()):
         print(f"  slide {n}: {what}")
     if args.dry_run:
