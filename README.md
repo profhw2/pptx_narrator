@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22812409.svg)](https://doi.org/10.5281/zenodo.22812409)
 
 **PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in the presenter's own cloned voice, in the language of the notes or translated into another language, and writes the audio back into the deck. The whole deck keeps one consistent voice however often it is revised, even when the presenter cannot speak (e.g. because of a cold).
 
@@ -206,7 +205,7 @@ The smoke test mocks the TTS, ASR and translation back-ends, so no models or net
 
 ## Citation
 
-If you use PPTX-Narrator, please cite the archived release on Zenodo (see the DOI badge above; metadata in [`CITATION.cff`](CITATION.cff)). Changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
+If you use PPTX-Narrator, please cite the archived release on Zenodo; its DOI is added here and to [`CITATION.cff`](CITATION.cff) with the v1.0.0 release. Changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

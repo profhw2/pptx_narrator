@@ -9,11 +9,7 @@ authors:
     affiliation: "Graduate School of Information Science and Technology, Hokkaido University"
     orcid: "https://orcid.org/0000-0002-1892-9067"
 repository-code: "https://github.com/profhw2/pptx_narrator"
-doi: "10.5281/zenodo.22812409"
-identifiers:
-  - type: doi
-    value: "10.5281/zenodo.22812409"
-    description: "Zenodo archive of v1.0.0"
+# doi: added with the v1.0.0 Zenodo release
 keywords:
   - text-to-speech
   - voice-cloning
