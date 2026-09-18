@@ -199,13 +199,23 @@ The report is a listening aid, not a pass/fail test: high similarity usually mea
 - Machine translation should be reviewed before synthesis; terms replaced before translation can still be altered by the translator.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
 
+## Checking the ASR screening
+
+`examples/screening_check.py` measures how the screening behaves when the narration does not match its text. It copies a workspace, alters the intended text of half of the slides (dropping a sentence, misreading a term or a number), runs the ASR check on the copy and reports where those slides ended up in the ranking:
+
+```bash
+python examples/screening_check.py --workspace ws --target-lang ja --asr-model small --asr-device cuda
+```
+
+The original workspace is not modified. `--dry-run` shows the alterations without running the ASR.
+
 ## Tests
 
 ```bash
 python tests/smoke_test.py
 ```
 
-The smoke test mocks the TTS, ASR and translation back-ends, so no models or network access are needed (requires `numpy`, `soundfile` and FFmpeg).
+The smoke test mocks the TTS, ASR and translation back-ends, so no models or network access are needed (requires `numpy`, `soundfile` and FFmpeg). It covers note extraction and language detection, dictionary reading and replacement, unit normalization, term scanning, translation and the hash that marks a translation as outdated, the structured notes and their round trip, the ASR comparison scores, packing (insertion, replacement, trim and pointer removal, slide timings) and the command-line checks.
 
 ## Support and contributions
 
