@@ -1,84 +1,70 @@
 #!/usr/bin/env python3
-"""Check how the ASR screening ranks narration that does not match its text.
+"""Measure which narration errors the ASR check detects.
 
-The check reuses audio that has already been synthesized. For a subset of slides it
-alters the *intended* text of the narration (the `.spoken.txt` file that `--verify`
-compares against the transcript), which puts the text and the audio out of step in the
-same way a synthesis error would, and then runs the ASR check on the result. Since the
-altered slides are known, the report can be read as a ranking problem: do the slides
-whose audio no longer matches their text end up at the bottom of the report?
+The transcript of a slide depends only on its audio, so it has to be produced once; any
+number of hypothetical narration errors can then be scored against it without
+synthesizing or transcribing anything again. This script injects one error of a known
+size into the intended text of each slide -- a run of characters deleted, as when the
+engine skips a phrase, or replaced by other words, as when it misreads a term -- and
+reports how often the check notices, as a function of the size of the error and the
+length of the note.
 
     python examples/screening_check.py --workspace ws --target-lang ja \
         --asr-model small --asr-device cuda
 
-It writes a copy of the workspace (<workspace>_screening) and a summary CSV next to it;
-the original workspace is not modified.
+If the workspace already holds a verification report, its transcripts are reused and no
+ASR model is loaded (--report to give another one). The workspace is not modified.
 """
 import argparse
 import csv
 import os
 import random
 import re
-import shutil
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import pptx_narrator as pn  # noqa: E402
 
-SENTENCE_END = re.compile(r'(?<=[。！？])|(?<=[.!?])\s+')
+FILLER = "それからこの場合においてもおよそ同じように考えることができるという点がここでは重要になります"
 
 
-def drop_sentence(text, rng):
-    parts = [p for p in SENTENCE_END.split(text) if p and p.strip()]
-    if len(parts) < 2:
-        return None, None
-    i = rng.randrange(len(parts))
-    return "".join(parts[:i] + parts[i + 1:]), f"dropped a sentence of {len(parts[i])} characters"
+def delete_run(text, size, rng):
+    """Drop `size` characters, as when a phrase is skipped."""
+    if len(text) <= size + 10:
+        return None
+    i = rng.randrange(0, len(text) - size)
+    return text[:i] + text[i + size:]
 
 
-def swap_term(text, rng):
-    """Replace one long word with another word of the text (a misread technical term)."""
-    words = sorted({w for w in re.findall(r'[A-Za-z]{3,}|[ァ-ヴー]{3,}|[一-龥]{2,}', text)}, key=str)
-    if len(words) < 2:
-        return None, None
-    a, b = rng.sample(words, 2)
-    if a not in text:
-        return None, None
-    return text.replace(a, b, 1), f"read '{a}' as '{b}'"
+def replace_run(text, size, rng):
+    """Replace `size` characters with other words, as when a term is misread."""
+    if len(text) <= size + 10:
+        return None
+    i = rng.randrange(0, len(text) - size)
+    filler = (FILLER * (size // len(FILLER) + 1))[:size]
+    return text[:i] + filler + text[i + size:]
 
 
-def change_number(text, rng):
-    numbers = re.findall(r'\d+', text)
-    if not numbers:
-        return None, None
-    n = rng.choice(numbers)
-    other = str((int(n) + 1 + rng.randrange(8)) % (10 ** len(n)))
-    return text.replace(n, other, 1), f"read the number {n} as {other}"
+KINDS = {"deleted": delete_run, "misread": replace_run}
 
 
-def drop_clause(text, rng):
-    """Drop a run of about 20 characters (a phrase swallowed by the engine)."""
-    if len(text) < 60:
-        return None, None
-    i = rng.randrange(0, len(text) - 30)
-    return text[:i] + text[i + 20:], "dropped 20 characters"
-
-
-PERTURBATIONS = [drop_sentence, swap_term, change_number, drop_clause]
+def transcripts_from_report(path):
+    with open(path, encoding="utf-8") as f:
+        return {int(r["slide"]): r["asr_text"] for r in csv.DictReader(f) if r.get("asr_text")}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--target-lang", "--target_lang", dest="target_lang", default="ja")
-    ap.add_argument("--model-label", "--model_label", dest="model_label", default=None,
-                    help="Engine/model part of the audio file names (inferred by default)")
+    ap.add_argument("--model-label", "--model_label", dest="model_label", default=None)
+    ap.add_argument("--report", default=None, help="Verification report to take the transcripts from")
     ap.add_argument("--asr-model", "--asr_model", dest="asr_model", default="small")
     ap.add_argument("--asr-device", "--asr_device", dest="asr_device", default="cpu")
     ap.add_argument("--threshold", type=float, default=0.85)
+    ap.add_argument("--sizes", default="3,6,12,25,50,100", help="Error sizes in characters")
+    ap.add_argument("--repeats", type=int, default=20, help="Random positions per slide and size")
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--perturb", type=int, default=None, help="How many slides to alter (default: half)")
-    ap.add_argument("--dry-run", action="store_true", help="Only show what would be altered")
     args = ap.parse_args()
 
     lang, ws = args.target_lang.lower(), args.workspace
@@ -89,72 +75,78 @@ def main():
     if label is None:
         sys.exit(f"give --model-label; the workspace holds {sorted(labels) or 'no audio'}")
 
-    slides = sorted(int(m.group(1)) for f in os.listdir(ws)
-                    for m in [re.fullmatch(rf'slide_(\d+){re.escape(suffix)}\.{re.escape(label)}\.m4a', f)]
-                    if m and os.path.exists(os.path.join(ws, pn.spoken_filename(int(m.group(1)), lang, label))))
-    if not slides:
-        sys.exit("no slides with both audio and spoken text were found")
+    report = args.report or os.path.join(ws, f"verify_report{suffix}.{label}.csv")
+    if not os.path.exists(report):
+        print(f"no report at {report}; transcribing the audio first")
+        slides = sorted(int(m.group(1)) for f in os.listdir(ws)
+                        for m in [re.fullmatch(rf'slide_(\d+){re.escape(suffix)}\.{re.escape(label)}\.m4a', f)] if m)
+        pn.step_verify_audio(ws, slides, lang, label, args.asr_model, args.asr_device, args.threshold)
+    asr = transcripts_from_report(report)
+
+    scores = pn.kana_scores if pn.base_lang(lang) == "ja" else pn.text_scores
+    intended = {}
+    for n in sorted(asr):
+        p = os.path.join(ws, pn.spoken_filename(n, lang, label))
+        if os.path.exists(p):
+            text = open(p, encoding="utf-8").read().strip()
+            if text:
+                intended[n] = text
+    if not intended:
+        sys.exit("no spoken-text files found next to the report")
+
+    baseline = {n: scores(intended[n], asr[n])[0] for n in intended}
+    below = [n for n, s in baseline.items() if s < args.threshold]
+    print(f"{len(intended)} slides, note length {min(len(t) for t in intended.values())}-"
+          f"{max(len(t) for t in intended.values())} characters")
+    print(f"without any injected error, {len(below)} slide(s) score below {args.threshold}"
+          + (f": {below}" if below else ""))
+
+    for n in below:  # a slide already below the threshold would "detect" everything
+        intended.pop(n, None)
+    if not intended:
+        sys.exit("every slide is already below the threshold; nothing to measure")
 
     rng = random.Random(args.seed)
-    n_perturb = args.perturb if args.perturb is not None else max(1, len(slides) // 2)
-    texts = {n: open(os.path.join(ws, pn.spoken_filename(n, lang, label)), encoding="utf-8").read().strip()
-             for n in slides}
+    sizes = [int(x) for x in args.sizes.split(",")]
+    buckets = [(0, 200), (200, 600), (600, 10 ** 9)]
+    trials = []
+    for n, text in intended.items():
+        for size in sizes:
+            for kind, fn in KINDS.items():
+                for _ in range(args.repeats):
+                    altered = fn(text, size, rng)
+                    if altered is None:
+                        continue
+                    s = scores(altered, asr[n])[0]
+                    trials.append(dict(slide=n, note_length=len(text), size=size, kind=kind,
+                                       similarity=round(s, 4), baseline=round(baseline[n], 4),
+                                       drop=round(baseline[n] - s, 4), detected=s < args.threshold))
 
-    # Alter as many slides as asked for, skipping those whose text is too short to alter.
-    altered, new_texts = {}, {}
-    for n in rng.sample(slides, len(slides)):
-        if len(altered) >= n_perturb:
-            break
-        for fn in rng.sample(PERTURBATIONS, len(PERTURBATIONS)):
-            candidate, what = fn(texts[n], rng)
-            if candidate and candidate != texts[n]:
-                altered[n], new_texts[n] = what, candidate
-                break
-    too_short = [n for n in slides if n not in altered and len(texts[n]) < 40]
+    def rate(rows):
+        return f"{sum(r['detected'] for r in rows):>4}/{len(rows):<4}" if rows else "   -    "
 
-    out = os.path.abspath(ws.rstrip("/") + "_screening")
-    os.makedirs(out, exist_ok=True)
-    for n in slides:
-        audio = pn.audio_filename(n, lang, label)
-        shutil.copy(os.path.join(ws, audio), os.path.join(out, audio))
-        open(os.path.join(out, pn.spoken_filename(n, lang, label)), "w", encoding="utf-8").write(
-            new_texts.get(n, texts[n]))
+    print("\ndetected (similarity < %.2f) by size of the error and length of the note:" % args.threshold)
+    print(f"{'error':>7} | " + " | ".join(f"{lo}-{hi if hi < 10**9 else ''} chars".rjust(16) for lo, hi in buckets)
+          + " |         all")
+    for size in sizes:
+        row = [t for t in trials if t["size"] == size]
+        cells = [rate([t for t in row if lo <= t["note_length"] < hi]) for lo, hi in buckets]
+        print(f"{size:>5} c | " + " | ".join(c.rjust(16) for c in cells) + " | " + rate(row))
+    for kind in KINDS:
+        rows = [t for t in trials if t["kind"] == kind]
+        print(f"{kind:>10}: {rate(rows)}")
+    print("\nmedian fall in similarity caused by the error:")
+    for size in sizes:
+        drops = sorted(t["drop"] for t in trials if t["size"] == size)
+        if drops:
+            print(f"{size:>5} c | {drops[len(drops) // 2]:.3f}")
 
-    print(f"{len(slides)} slides, {len(altered)} of them altered"
-          + (f" ({len(too_short)} too short to alter)" if too_short else "") + ":")
-    for n, what in sorted(altered.items()):
-        print(f"  slide {n}: {what}")
-    if args.dry_run:
-        return
-
-    pn.step_verify_audio(out, slides, lang, label, args.asr_model, args.asr_device, args.threshold)
-
-    report = os.path.join(out, f"verify_report{suffix}.{label}.csv")
-    rows = list(csv.DictReader(open(report, encoding="utf-8")))
-    ranking = [int(r["slide"]) for r in rows]  # worst first
-    scores = {int(r["slide"]): float(r["similarity"]) for r in rows}
-    flagged = {int(r["slide"]) for r in rows if r["status"] == "FLAGGED"}
-
-    hit = sorted(altered) and [n for n in ranking[:len(altered)] if n in altered]
-    summary = os.path.join(out, "screening_check.csv")
-    with open(summary, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["slide", "altered", "how", "similarity", "rank_worst_first", "flagged"])
-        for n in ranking:
-            w.writerow([n, n in altered, altered.get(n, ""), f'{scores[n]:.3f}',
-                        ranking.index(n) + 1, n in flagged])
-
-    def median(v):
-        v = sorted(v)
-        return v[len(v) // 2] if v else float("nan")
-
-    kept = [n for n in slides if n not in altered]
-    print(f"\naltered slides in the {len(altered)} worst positions: {len(hit)}/{len(altered)}")
-    print(f"flagged (similarity < {args.threshold}): {len(flagged & set(altered))}/{len(altered)} altered, "
-          f"{len(flagged & set(kept))}/{len(kept)} unaltered")
-    print(f"median similarity: altered {median([scores[n] for n in altered]):.3f}, "
-          f"unaltered {median([scores[n] for n in kept]):.3f}")
-    print(f"per-slide detail: {summary}")
+    out = os.path.join(os.path.dirname(os.path.abspath(report)), "screening_check.csv")
+    with open(out, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(trials[0].keys()))
+        w.writeheader()
+        w.writerows(trials)
+    print(f"\n{len(trials)} trials written to {out}")
 
 
 if __name__ == "__main__":

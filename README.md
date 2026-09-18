@@ -201,13 +201,13 @@ The report is a listening aid, not a pass/fail test: high similarity usually mea
 
 ## Checking the ASR screening
 
-`examples/screening_check.py` measures how the screening behaves when the narration does not match its text. It copies a workspace, alters the intended text of half of the slides (dropping a sentence, misreading a term or a number), runs the ASR check on the copy and reports where those slides ended up in the ranking:
+`examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the intended text of each slide -- a run of characters deleted, as when a phrase is skipped, or replaced by other words, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note:
 
 ```bash
 python examples/screening_check.py --workspace ws --target-lang ja --asr-model small --asr-device cuda
 ```
 
-The original workspace is not modified. `--dry-run` shows the alterations without running the ASR, and `--perturb N` sets how many slides to alter (slides whose text is too short to alter are skipped). If faster-whisper cannot load the CUDA libraries (`libcublas.so.12 is not found`), run the check with `--asr-device cpu` or install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.
+The workspace is not modified; `--sizes` and `--repeats` set the error sizes in characters and the number of random positions per slide and size. The result says for which note lengths a given error is large enough to cross the threshold, which is what the threshold has to be chosen against. If faster-whisper cannot load the CUDA libraries (`libcublas.so.12 is not found`), use `--asr-device cpu` or install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.
 
 ## Tests
 

@@ -18,7 +18,7 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - `--tts` reports the synthesis time per slide and a summary for the run.
 - `tests/smoke_test.py` covers the pipeline with the back-ends mocked.
 - `examples/make_sample_deck.py` builds a small deck with notes for trying the pipeline.
-- `examples/screening_check.py`, which alters the intended text of some slides and reports where the ASR check ranks them.
+- `examples/screening_check.py`, which injects narration errors of a known size into the intended text and reports how often the ASR check notices them, by error size and note length.
 - `examples/readings_ja_molbio.csv`, a working reading dictionary from the author's molecular-biology lectures.
 - In a dictionary, a `#` at the start of a line or after a space starts a comment that runs to the end of the line, for annotating an entry or switching it off; a line that is only a comment is skipped. A `#` inside a term (`C#`, or `"#1"` in quotes) is kept.
 - `--scan` no longer proposes single letters or digits, which have no useful reading of their own.
