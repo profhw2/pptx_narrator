@@ -348,8 +348,46 @@ def _is_single_letter(term):
     return bool(re.fullmatch(r'[A-Za-z0-9]', term.strip()))
 
 
+_KANJI_RE = re.compile(r'[一-鿿々]')
+
+
+def japanese_compounds(text):
+    """Compounds of several words, with the reading a Japanese front end assembles for them.
+
+    A compound the front end has to put together (二|本|鎖) is where a reading can go wrong:
+    鎖 is クサリ on its own but サ in 二本鎖. Returns {compound: assembled reading}; the
+    reading is a proposal to correct, not an answer.
+    """
+    try:
+        import pyopenjtalk
+    except ImportError:
+        return {}
+    try:
+        tokens = pyopenjtalk.run_frontend(text)
+    except Exception:
+        return {}
+    out, run = {}, []
+
+    def flush():
+        if len(run) > 1:
+            word = "".join(t["string"] for t in run)
+            try:
+                out[word] = unicodedata.normalize("NFKC", pyopenjtalk.g2p(word, kana=True))
+            except Exception:
+                pass
+        run.clear()
+
+    for token in tokens:
+        if token.get("pos") == "名詞" and _KANJI_RE.search(token.get("string", "")):
+            run.append(token)
+        else:
+            flush()
+    flush()
+    return out
+
+
 def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slides, target_lang,
-                              source_lang="auto", for_translation=False):
+                              source_lang="auto", for_translation=False, propose_compounds=False):
     """Collect candidate terms and append them to the dictionary file of the run.
 
     The scanned text is the text the dictionary will be applied to: the narration text in
@@ -466,6 +504,25 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
         logger.info(f"New term: {term} -> {repl or '(blank)'}")
 
     append_dictionary_entries(dict_path, new_entries)
+
+    if propose_compounds and base_lang(target_lang) == "ja":
+        known = {t for t, _, _ in entries or []} | {t for t, _ in new_entries}
+        proposals = {}
+        for path, file_lang in texts:
+            if base_lang(file_lang) != "ja":
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                for word, reading in japanese_compounds(f.read()).items():
+                    if word not in known:
+                        proposals[word] = reading
+        if proposals:
+            with open(dict_path, "a", encoding="utf-8", newline="") as f:
+                f.write("\n# Compounds of the notes with the reading a Japanese front end assembles for them.\n"
+                        "# They are comments, so they do nothing until the '#' is removed; correct the reading\n"
+                        "# first (鎖 is read クサリ on its own but サ in 二本鎖) or leave the line as it is.\n")
+                for word in sorted(proposals):
+                    f.write(f"#{word},{proposals[word]},\n")
+            logger.info(f"{len(proposals)} compound(s) proposed as comment lines in {dict_path}")
     logger.info(f"Added {len(new_entries)} entries to {dict_path}")
 
 SI_PREFIXES = {
