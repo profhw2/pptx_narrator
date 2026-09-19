@@ -23,7 +23,7 @@ _backup_*/
 build/
 dist/
 
-# manuscript (kept locally, not published with the software)
-softwarex_paper.*
+# manuscript (kept locally in paper/, not published with the software)
+paper/
 _test_output/
 Claude outputs/
