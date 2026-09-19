@@ -1733,8 +1733,8 @@ PPTX-Narrator: automated narration of PowerPoint presenter notes
  3. pptx-narrator --pptx deck.pptx --workspace ws --target-lang de --scan --dict-file readings_de.csv
  4. (review readings_de.csv) pptx-narrator --pptx deck.pptx --workspace ws --target-lang de --dict-file readings_de.csv \\
       --tts --verify --pack --writeback-notes --out deck_de.pptx --ref-wav ref.wav --ref-text-file ref.txt
-Options are written with hyphens; the underscore spellings of v1.0
-(e.g. --dict_file, --verify_threshold) are still accepted.
+Options are written with hyphens; the underscore spellings
+(e.g. --dict_file, --verify_threshold) are also accepted.
 """
 
 
