@@ -90,6 +90,14 @@ ok(os.listdir(ws2) == [], "--in-lang is a selector: a note of another language i
 ws2b = os.path.join(d, "ws2b"); os.makedirs(ws2b)
 pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en")
 ok(os.listdir(ws2b) == ["slide_2_en.txt"], "--in-lang keeps only the notes of that language")
+ok(pn.step_extract_notes(deck, ws2b, [1, 2, 3], "fr") == 0
+   and pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en") == 1,
+   "extract reports what this run wrote, not what the workspace already held")
+ok(pn._file_role("slide_3_ja.txt") == "note text"
+   and pn._file_role("slide_3_ja.v4.spoken.txt") == "spoken text"
+   and pn._file_role("slide_3_ja.v4.m4a") == "audio"
+   and pn._file_role("verify_report_ja.v4.csv") == "verification report",
+   "a directory record says what each file is")
 ok(pn.find_source_text(ws, 1, "auto", exclude_lang="de")[0] == "ja" and pn.find_source_text(ws, 3, "auto", exclude_lang="de")[0] == "ko"
    and pn.find_source_text(ws, 2, "auto", exclude_lang="en") == (None, None), "find_source_text")
 

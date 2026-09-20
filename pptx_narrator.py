@@ -776,12 +776,14 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                 continue
             languages[n] = source_lang
 
+    written = 0
     for slide_num, txt in plain.items():
         if slide_num not in languages:
             continue
         name = text_filename(slide_num, languages[slide_num])
         with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
             f.write(txt)
+        written += 1
         logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {languages[slide_num]}).")
 
     for slide_num, info in structured.items():
@@ -793,6 +795,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         src_name = text_filename(slide_num, src_lang)
         with open(os.path.join(workspace_dir, src_name), "w", encoding="utf-8") as f:
             f.write(info["source_text"])
+        written += 1
         logger.info(f"Slide #{slide_num}: structured note; source part extracted to {src_name} (language: {src_lang}).")
 
         narr_lang = info["narration_lang"]
@@ -817,18 +820,22 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     if source_lang == "auto" and languages:
         summary = Counter(languages.values()).most_common()
         logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
+    return written
 
 def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang,
                          dictionary=None, overwrite=False):
     logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' ---")
     translators = {}
+    sources_found = 0
     for slide_num in requested_slides:
         tgt_p = os.path.join(workspace_dir, text_filename(slide_num, target_lang))
         if not overwrite and os.path.exists(tgt_p) and os.path.getsize(tgt_p) > 0:
+            sources_found += 1
             continue
         src_lang, src_p = find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=target_lang)
         if src_p is None:
             continue
+        sources_found += 1
         with open(src_p, "r", encoding="utf-8") as f:
             text = f.read().strip()
         if not text:
@@ -862,6 +869,7 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
                 out_f.write('\n'.join(translated_lines))
             record_translation(workspace_dir, slide_num, target_lang, src_lang, text)
             logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang}.")
+    return sources_found
 
 def step_generate_audio(
     workspace_dir,
@@ -1821,6 +1829,29 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _file_role(name):
+    """What a workspace file is, for the record of a directory input."""
+    if name.endswith(".spoken.txt"):
+        return "spoken text"
+    if name.endswith(".stale.txt"):
+        return "set-aside narration"
+    if name.startswith("verify_report"):
+        return "verification report"
+    if name.startswith("verify_differences"):
+        return "verification differences"
+    if name == TRANSLATION_MANIFEST:
+        return "translation manifest"
+    if _TEXT_FILE_RE.match(name):
+        return "note text"
+    if name.lower().endswith((".m4a", ".wav")):
+        return "audio"
+    if name.lower().endswith(".csv"):
+        return "dictionary"
+    if name.lower().endswith(".pptx"):
+        return "deck"
+    return "other"
+
+
 def _input_snapshot(path, command):
     """Return a content-identity snapshot for a file or a command-relevant directory."""
     path = os.path.abspath(path)
@@ -1847,6 +1878,7 @@ def _input_snapshot(path, command):
                 continue
             files.append({
                 "path": os.path.abspath(full),
+                "role": _file_role(name),
                 "mtime": os.path.getmtime(full),
                 "sha256": _sha256_file(full),
             })
@@ -2228,9 +2260,7 @@ def main(argv=None):
             # otherwise report success while producing nothing for that language.
             missing = []
             for lang in langs:
-                step_extract_notes(input_path, workspace_dir, req_slides, lang)
-                if not any(_TEXT_FILE_RE.match(n) and normalize_lang(_TEXT_FILE_RE.match(n).group(2) or "ja") == lang
-                           for n in os.listdir(workspace_dir)):
+                if not step_extract_notes(input_path, workspace_dir, req_slides, lang):
                     missing.append(lang)
             if missing:
                 parser.error("no note in " + ", ".join(missing) + " was found in " + os.path.basename(input_path))
@@ -2255,6 +2285,9 @@ def main(argv=None):
                 extract_state = state.get("commands", {}).get("extract", {})
                 if extract_state.get("input") and _snapshot_matches(extract_state["input"], input_snapshot):
                     workspace_dir = extract_state.get("workspace")
+                    if workspace_dir:
+                        logger.info(f"Using the workspace of the last extract of this deck: {workspace_dir} "
+                                    "(give --workspace to choose another).")
             if not workspace_dir or not os.path.isdir(workspace_dir):
                 parser.error("pack requires --workspace unless a matching extract workspace is available")
             workspace_dir = os.path.abspath(workspace_dir)
@@ -2275,8 +2308,10 @@ def main(argv=None):
     elif command == "translate":
         slides = sorted(_slides_from_workspace(workspace_dir))
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
-        step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
-                             dictionary=dictionaries, overwrite=effective["retranslate"])
+        if not step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
+                                    dictionary=dictionaries, overwrite=effective["retranslate"]):
+            parser.error(f"no {effective['in_lang']} text was found in "
+                         f"{os.path.basename(original_file_input or input_path)}")
     elif command == "synthesize":
         slides = sorted(_slides_from_workspace(workspace_dir))
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
@@ -2327,9 +2362,24 @@ def main(argv=None):
         _sync_file_workspace(file_workspace_tmp, original_file_input, os.path.basename(original_file_input))
         shutil.rmtree(file_workspace_tmp, ignore_errors=True)
 
-    # Record the explicit/reused input and the fully resolved effective configuration.
-    _record_input(state, command, input_snapshot,
-                  {"workspace": workspace_dir} if workspace_dir else {})
+    # Record the input as it stands after the run. translate and synthesize write their
+    # results into the directory they read, so recording the state from before the run
+    # would make the next reuse fail on this run's own output.
+    try:
+        input_snapshot = _input_snapshot(input_path, command)
+    except RuntimeError:
+        pass
+    extra = {}
+    if workspace_dir:
+        extra["workspace"] = workspace_dir
+        # pack may take the workspace from the previous extract rather than from
+        # --workspace; record what was actually read so the choice is not implicit.
+        if command == "pack":
+            try:
+                extra["workspace_snapshot"] = _input_snapshot(workspace_dir, "verify")
+            except RuntimeError:
+                pass
+    _record_input(state, command, input_snapshot, extra)
     state["commands"][command]["resolved_config"] = effective
     state["commands"][command]["software_version"] = __version__
     state["commands"][command]["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
