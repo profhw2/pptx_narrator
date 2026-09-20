@@ -9,7 +9,7 @@ engine skips a phrase, or replaced by other words, as when it misreads a term --
 reports how often the check notices, as a function of the size of the error and the
 length of the note.
 
-    python examples/screening_check.py --workspace ws --target-lang ja \
+    python examples/screening_check.py --workspace ws --in-lang ja \
         --asr-model small --asr-device cuda
 
 If the workspace already holds a verification report, its transcripts are reused and no
@@ -64,7 +64,7 @@ def transcripts_from_report(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--workspace", required=True)
-    ap.add_argument("--target-lang", "--target_lang", dest="target_lang", default="ja")
+    ap.add_argument("--in-lang", "--in_lang", dest="in_lang", default="ja")
     ap.add_argument("--model-label", "--model_label", dest="model_label", default=None)
     ap.add_argument("--report", default=None, help="Verification report to take the transcripts from")
     ap.add_argument("--asr-model", "--asr_model", dest="asr_model", default="small")
@@ -75,7 +75,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
 
-    lang, ws = args.target_lang.lower(), args.workspace
+    lang, ws = args.in_lang.lower(), args.workspace
     suffix = pn.lang_suffix(lang)
     labels = {m.group(1) for f in os.listdir(ws)
               for m in [re.fullmatch(rf'slide_\d+{re.escape(suffix)}\.(.+)\.m4a', f)] if m}

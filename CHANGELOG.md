@@ -5,6 +5,11 @@
 First public release. Versions 1.1.0 and 1.2.0 were development numbers used before this release and are not published.
 
 ### Features
+- The command line is organized as commands: `extract`, `scan`, `translate`, `synthesize`, `verify` and `pack`. Nothing runs implicitly; each command names what it does and takes its data as an argument.
+- `INPUT` is a file or a directory. A directory is processed as a whole, a file on its own, so one slide is redone by naming its file. When `INPUT` is omitted, the input recorded by the previous run of that command is reused only if its SHA-256 still matches, and a changed input has to be named again (`.pptx_narrator_state.json`).
+- `--in-lang` is the language of the data a command reads and `--out-lang` the language it writes; `--out-lang` belongs to `translate`. For `extract`, `--in-lang` selects the languages to extract, a note of another language is reported and left out, and a requested language the deck does not contain is an error.
+- Parameters that stay the same across runs are read from a TOML file (`--config`, or `pptx_narrator.toml` in the current directory), with a `[common]` section and one section per command. Values are resolved as built-in defaults, then the configuration file, then the command line.
+- Every run writes `.pptx_narrator_resolved.toml`: the effective value of every parameter, the version of the tool, the time, and the path and SHA-256 of each input. It is a valid configuration file, so a run can be repeated from it.
 - Narration of the presenter notes of a PowerPoint deck with a voice-cloning TTS engine (Qwen3-TTS in-process, GPT-SoVITS through its HTTP API); the voice is defined by a few seconds of reference speech and its transcript.
 - Multilingual: the note language is identified automatically (kana/Hangul rules plus py3langid), notes can be machine-translated into any language offered by Google Translate, and narration can be synthesized in any language of the selected engine.
 - Dictionaries are plain string-replacement lists (`string,replacement,type`) applied to the notes before translation and to the narration text before synthesis; `--dict-file` is repeatable and `--scan` proposes candidate terms.

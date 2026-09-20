@@ -86,7 +86,10 @@ pn.step_extract_notes(deck, ws, [1, 2, 3], "auto")
 ok(sorted(os.listdir(ws)) == ["slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"], f"auto extraction {sorted(os.listdir(ws))}")
 ws2 = os.path.join(d, "ws2"); os.makedirs(ws2)
 pn.step_extract_notes(deck, ws2, [2], "de")
-ok(os.listdir(ws2) == ["slide_2_de.txt"], "explicit --source-lang")
+ok(os.listdir(ws2) == [], "--in-lang is a selector: a note of another language is left out")
+ws2b = os.path.join(d, "ws2b"); os.makedirs(ws2b)
+pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en")
+ok(os.listdir(ws2b) == ["slide_2_en.txt"], "--in-lang keeps only the notes of that language")
 ok(pn.find_source_text(ws, 1, "auto", exclude_lang="de")[0] == "ja" and pn.find_source_text(ws, 3, "auto", exclude_lang="de")[0] == "ko"
    and pn.find_source_text(ws, 2, "auto", exclude_lang="en") == (None, None), "find_source_text")
 
@@ -111,6 +114,7 @@ ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")), "existing trans
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T, overwrite=True)
 ok(FakeTr.calls[-1] == "Basenpaareの話です。" and read(os.path.join(ws, "slide_1_ja.txt")) == "塩基対の話です。",
    "--retranslate: dictionary applied to the note sent to the translator; note file unchanged")
+write(os.path.join(ws2, "slide_2_de.txt"), "Heute sprechen wir über Basenpaare.")
 pn.step_translate_notes(ws2, [2], "de", "ja")
 ok(read(os.path.join(ws2, "slide_2_ja.txt")).startswith("[de->ja]"), "translate de -> ja")
 pn.step_translate_notes(ws2, [2], "de", "xx")
@@ -374,9 +378,17 @@ ok(any("older version of the source note" in m for m in logs) and note_old["fing
 
 # ---------------------------------------------------------------- command line
 parser = pn.build_parser()
-a = parser.parse_args(["--pptx", deck, "--source_lang", "JA", "--target-lang", "zh_cn", "--translate",
+a = parser.parse_args(["translate", "ws", "--in_lang", "JA", "--out-lang", "zh_cn",
                        "--dict-file", "a.csv", "--dict_file", "b.csv"])
-ok(a.source_lang == "ja" and a.target_lang == "zh-CN" and a.dict_file == ["a.csv", "b.csv"], "CLI normalization, aliases, repeatable --dict-file")
+ok(a.command == "translate" and a.in_lang == "ja" and a.out_lang == "zh-CN"
+   and a.dict_file == ["a.csv", "b.csv"], "CLI normalization, aliases, repeatable --dict-file")
+
+ok([c for c in ("extract", "scan", "translate", "synthesize", "verify", "pack")
+    if parser.parse_args([c, deck] if c in ("extract", "pack") else [c, "ws"]).command != c] == [],
+   "every pipeline step is a command of its own")
+
+ok(parser.parse_args(["extract", deck]).input == deck
+   and parser.parse_args(["extract"]).input is None, "INPUT is positional and optional")
 
 def expect_error(argv, text):
     buf = io.StringIO()
@@ -387,10 +399,25 @@ def expect_error(argv, text):
         pass
     ok(text in buf.getvalue(), f"CLI error: {text}")
 
-expect_error(["--pptx", deck, "--tts", "--engine", "qwen3", "--target-lang", "nl", "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
-expect_error(["--pptx", deck, "--tts", "--target-lang", "de", "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support --target-lang 'de'")
-expect_error(["--pptx", deck, "--translate", "--source-lang", "de", "--target-lang", "de"], "--translate needs")
-expect_error(["--pptx", deck, "--scan"], "--scan needs --dict-file")
-ok(pn.build_parser().parse_args(["--pptx", deck]).remove_recorded == "all"
-   and pn.RECORDED_CHOICES["none"] == (), "--remove-recorded defaults to all")
+expect_error(["synthesize", "ws", "--in-lang", "nl", "--engine", "qwen3",
+              "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
+expect_error(["synthesize", "ws", "--in-lang", "de",
+              "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support")
+expect_error(["translate", "ws", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
+expect_error(["scan", "ws"], "--in-lang")
+expect_error(["extract", deck, "--in-lang", "fr"], "no note in fr")
+expect_error(["scan", "--in-lang", "ja", "--dict-file", "d.csv"], "no previous input")
+
+# built-in defaults -> configuration file -> command line
+args = parser.parse_args(["pack", deck])
+eff = pn._merge_effective("pack", args, {}, parser)
+ok(eff["remove_recorded"] == "all" and eff["slide_pause"] == 1.0
+   and pn.RECORDED_CHOICES["none"] == (), "built-in defaults are used when nothing else sets a value")
+eff = pn._merge_effective("pack", args, {"pack": {"slide_pause": 2.5}}, parser)
+ok(eff["slide_pause"] == 2.5, "the configuration file overrides the built-in default")
+eff = pn._merge_effective("pack", args, {"common": {"slide_pause": 3.5}}, parser)
+ok(eff["slide_pause"] == 3.5, "a [common] section applies to every command")
+args = parser.parse_args(["pack", deck, "--slide-pause", "0.5"])
+eff = pn._merge_effective("pack", args, {"pack": {"slide_pause": 2.5}}, parser)
+ok(eff["slide_pause"] == 0.5, "the command line overrides the configuration file")
 print("ALL TESTS PASSED")

@@ -10,3 +10,4 @@ torch>=2.0.0
 qwen-tts
 faster-whisper>=0.10.0
 pyopenjtalk>=0.3.0
+tomli>=2.0.1; python_version < '3.11'

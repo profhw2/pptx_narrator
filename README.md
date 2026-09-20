@@ -20,13 +20,13 @@
 | Step | Languages |
 |---|---|
 | Note language identification | Kana/Hangul rules and [py3langid](https://github.com/adbar/py3langid), restricted to Google Translate languages |
-| `--translate` | Any source/target pair supported by Google Translate |
-| `--tts --engine qwen3` | zh, en, ja, ko, de, fr, ru, pt, es, it |
-| `--tts --engine gpt_sovits` | zh, en, ja, ko, yue (Cantonese) |
-| `--verify` | Japanese: kana-level comparison; other languages: character-level comparison of normalized text |
+| `translate` | Any source/target pair supported by Google Translate |
+| `synthesize --engine qwen3` | zh, en, ja, ko, de, fr, ru, pt, es, it |
+| `synthesize --engine gpt_sovits` | zh, en, ja, ko, yue (Cantonese) |
+| `verify` | Japanese: kana-level comparison; other languages: character-level comparison of normalized text |
 | Built-in unit readings | Japanese only (other languages: `unit` entries in the dictionaries) |
 
-Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN`. With `--source-lang auto` (default), the language of each note is identified from its text; notes too short or ambiguous to identify reliably ("Thank you.", a kanji-only title) are assigned the main language of the deck. The detected language is shown in the log and in the file name; give `--source-lang` to override it.
+Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN`. Without `--in-lang`, `extract` identifies the language of each note from its text; notes too short or ambiguous to identify reliably ("Thank you.", a kanji-only title) are assigned the main language of the deck. The detected language is shown in the log and in the file name. `--in-lang` selects which languages to extract: a note in another language is reported and left out, and a requested language the deck does not contain stops the run with an error.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN
 - One TTS engine:
   - **Qwen3-TTS**: installed with the `qwen3` extra below. Model weights (`Qwen/Qwen3-TTS-12Hz-{0.6B,1.7B}-Base`) are downloaded from Hugging Face on first use. A CUDA GPU or Apple Silicon (MPS) is strongly recommended.
   - **GPT-SoVITS**: a local GPT-SoVITS installation with its API server running, e.g. `python api_v2.py -a 127.0.0.1 -p 9880` in the GPT-SoVITS directory.
-- Network access for `--translate` (Google Translate).
+- Network access for `translate` (Google Translate).
 
 ## Installation
 
@@ -49,7 +49,7 @@ pip install -e ".[all]"     # everything
 ```
 
 This installs the `pptx-narrator` command. Running `python pptx_narrator.py ...` without installing also works (`pip install -r requirements.txt`).
-The `--scan` step downloads the NLTK `stopwords` and `words` corpora on first use; if that fails behind a proxy, run `python -m nltk.downloader stopwords words`.
+The `scan` command downloads the NLTK `stopwords` and `words` corpora on first use; if that fails behind a proxy, run `python -m nltk.downloader stopwords words`.
 
 ## Quick start
 
@@ -66,21 +66,22 @@ The pipeline is split into steps so that text can be reviewed before synthesis. 
 ### Narration in the language of the notes
 
 ```bash
-# 1. Extract notes and collect candidate technical terms into readings_ja.csv
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja \
-  --extract --scan --dict-file readings_ja.csv
+# 1. Extract the notes, then collect candidate readings into readings_ja.csv
+pptx-narrator extract lecture.pptx --workspace ws --in-lang ja
+pptx-narrator scan ws --in-lang ja --dict-file readings_ja.csv
 
 # 2. Review by hand: ws/slide_N_ja.txt (notes) and readings_ja.csv (readings)
 
-# 3. Synthesize with a cloned voice and verify
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --dict-file readings_ja.csv \
-  --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
-  --verify --cer-threshold 0.15
+# 3. Synthesize with a cloned voice, then screen the result
+pptx-narrator synthesize ws --in-lang ja --dict-file readings_ja.csv \
+  --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt
+pptx-narrator verify ws --in-lang ja --engine qwen3 --cer-threshold 0.15
 
 # 4. Listen to the slides flagged in ws/verify_report_ja.qwen3-1.7B.csv, fix the
-#    dictionary or notes, re-run step 3 for those slides (--slides 4,7), then pack
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3 \
-  --pack --out lecture_narrated.pptx
+#    dictionary or notes, re-run step 3 for one slide by naming its file
+#    (pptx-narrator synthesize ws/slide_4_ja.txt ...), then pack
+pptx-narrator pack lecture.pptx --workspace ws --in-lang ja --engine qwen3 \
+  --out lecture_narrated.pptx
 ```
 
 ### Translated narration
@@ -89,22 +90,22 @@ Translation is usually done once, while synthesis is repeated while readings are
 
 ```bash
 # 1. Extract the notes (language identified automatically) and collect terms to be translated
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
-  --extract --scan --dict-file terms_ja_de.csv
+pptx-narrator extract lecture.pptx --workspace ws
+pptx-narrator scan ws --in-lang ja --dict-file terms_ja_de.csv
 # 2. Fill in the German terms in terms_ja_de.csv, then translate
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
-  --translate --dict-file terms_ja_de.csv
+pptx-narrator translate ws --in-lang ja --out-lang de --dict-file terms_ja_de.csv
 # 3. Review ws/slide_N_de.txt; collect candidate readings from the German text
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de \
-  --scan --dict-file readings_de.csv
+pptx-narrator scan ws --in-lang de --dict-file readings_de.csv
 # 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed),
 #    writing the German narration above the original note
-pptx-narrator --pptx lecture.pptx --workspace ws --target-lang de --dict-file readings_de.csv \
-  --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
-  --verify --pack --writeback-notes --out lecture_de.pptx
+pptx-narrator synthesize ws --in-lang de --dict-file readings_de.csv \
+  --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt
+pptx-narrator verify ws --in-lang de --engine qwen3
+pptx-narrator pack lecture.pptx --workspace ws --in-lang de --engine qwen3 \
+  --writeback-notes --out lecture_de.pptx
 ```
 
-Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. In a single run with both `--translate` and `--tts`, the dictionaries are applied before translation and again before synthesis. This works, but replacements meant as readings (e.g. `CRISPR,C R I S P R`) then also end up in the translated text and in the written-back notes, and may be altered by the translator.
+Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. Because `translate` and `synthesize` are separate commands, each is given its own dictionary: replacements meant as readings (e.g. `CRISPR,C R I S P R`) stay out of the translated text and of the written-back notes.
 
 ### Workspace files
 
@@ -133,17 +134,17 @@ mRNA,メッセンジャーアールエヌエー,
 Gbp,ギガベースペア,unit
 ```
 
-- It is applied to the text processed in the run: with `--translate`, to each note before it is sent to the translator (e.g. `塩基対,Basenpaare` to fix a German term); with `--tts`, to the narration text before synthesis (readings); with both, at both points. The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
+- It is applied to the text the command processes: with `translate`, to each note before it is sent to the translator (e.g. `塩基対,Basenpaare` to fix a German term); with `synthesize`, to the narration text before synthesis (readings). The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
 - Longer strings are replaced first; alphanumeric strings only match on word boundaries; rows with an empty replacement are ignored.
 - `type` = `unit` marks unit symbols that follow a number (`3 Gbp`). For Japanese narration, built-in rules additionally read SI-prefixed units.
 - `--dict-file` can be given several times (e.g. a shared and a deck-specific file); later files take precedence.
-- `--scan` appends new candidates to the first `--dict-file` (created if missing). It scans the narration text in `--target-lang` when it exists, filling in provisional readings; otherwise, or together with `--translate`, it scans the notes to be translated and leaves the replacements blank. With `--scan-compounds` and Japanese narration, it additionally writes every compound of the notes, with the reading a Japanese front end assembles for it, as **comment lines** (`;二本鎖,ニホンクサリ,`). Comments do nothing, so the list can be long; compounds are where readings are unsettled (鎖 is クサリ alone but サ in 二本鎖), and an entry is activated by correcting the reading and removing the `;`. Needs `pyopenjtalk` (the `verify` extra).
+- `scan` appends new candidates to the first `--dict-file` (created if missing). It scans the text in `--in-lang`, filling in provisional readings when that is the narration language and leaving the replacements blank when the text is still to be translated. With `--scan-compounds` and Japanese narration, it additionally writes every compound of the notes, with the reading a Japanese front end assembles for it, as **comment lines** (`;二本鎖,ニホンクサリ,`). Comments do nothing, so the list can be long; compounds are where readings are unsettled (鎖 is クサリ alone but サ in 二本鎖), and an entry is activated by correcting the reading and removing the `;`. Needs `pyopenjtalk` (the `verify` extra).
 
-A four-column dictionary (`Term,Japanese_Reading,English_Reading,Type`) from an earlier development version can still be given with `--dict-file`; the column of the narration language (Japanese or English) is used. See the files in [`examples/`](examples/); [`examples/readings_ja_molbio.csv`](examples/readings_ja_molbio.csv) is a working dictionary from the author's molecular-biology lectures (104 entries: gene and organism names, researchers' names, units and Japanese words the engine misreads), which can be used as a starting point for that field. A dictionary belongs to a subject area rather than to a deck: once the terms of a course are in it, later decks need few new entries. An entry with an empty replacement leaves the term as it is and stops `--scan` from proposing it again; lone letters and digits are never proposed. A `;` at the start of a line or after a space begins a comment that runs to the end of the line, so an entry can be annotated or switched off without deleting it, and a line that is only a comment is skipped. Terms containing `#` or `;` are unaffected (`C#`); a term that begins with `;` is written in double quotes. Unit symbols not resolved otherwise can be spelled out letter by letter with a letter map for the narration language, e.g. `--letter-map examples/letter_map_ja.json`.
+A four-column dictionary (`Term,Japanese_Reading,English_Reading,Type`) from an earlier development version can still be given with `--dict-file`; the column of the narration language (Japanese or English) is used. See the files in [`examples/`](examples/); [`examples/readings_ja_molbio.csv`](examples/readings_ja_molbio.csv) is a working dictionary from the author's molecular-biology lectures (104 entries: gene and organism names, researchers' names, units and Japanese words the engine misreads), which can be used as a starting point for that field. A dictionary belongs to a subject area rather than to a deck: once the terms of a course are in it, later decks need few new entries. An entry with an empty replacement leaves the term as it is and stops `scan` from proposing it again; lone letters and digits are never proposed. A `;` at the start of a line or after a space begins a comment that runs to the end of the line, so an entry can be annotated or switched off without deleting it, and a line that is only a comment is skipped. Terms containing `#` or `;` are unaffected (`C#`); a term that begins with `;` is written in double quotes. Unit symbols not resolved otherwise can be spelled out letter by letter with a letter map for the narration language, e.g. `--letter-map examples/letter_map_ja.json`.
 
 ## Packing and notes write-back
 
-`--pack` embeds the generated audio in the same structure PowerPoint uses for recorded narration: the audio starts with the slide, is hidden during the show, and the slide advances automatically after the audio length. Slides without audio get a new narration object (a small speaker icon at the bottom right, visible only in the editor). If a slide already has audio (e.g. an earlier recording), that object is reused: it points to the new audio, and its trim, fade and bookmarks are removed. Each slide gets its own media file, so copied slides that shared one clip no longer overwrite each other, and clips no longer used are removed from the file. Slides that have animations but no audio are reported and left unchanged; insert any audio clip on such a slide in PowerPoint and pack again. The slide advances by itself one second after the narration ends, so that the last word is not clipped in a video; `--slide-pause` changes that pause. The audio icon of a narrated slide is parked next to the slide, outside the visible area, so that it does not cover the slide content while editing; `--keep-audio-icon` leaves it where it is. The icon is hidden during the slide show either way.
+`pack` embeds the generated audio in the same structure PowerPoint uses for recorded narration: the audio starts with the slide, is hidden during the show, and the slide advances automatically after the audio length. Slides without audio get a new narration object (a small speaker icon at the bottom right, visible only in the editor). If a slide already has audio (e.g. an earlier recording), that object is reused: it points to the new audio, and its trim, fade and bookmarks are removed. Each slide gets its own media file, so copied slides that shared one clip no longer overwrite each other, and clips no longer used are removed from the file. Slides that have animations but no audio are reported and left unchanged; insert any audio clip on such a slide in PowerPoint and pack again. The slide advances by itself one second after the narration ends, so that the last word is not clipped in a video; `--slide-pause` changes that pause. The audio icon of a narrated slide is parked next to the slide, outside the visible area, so that it does not cover the slide content while editing; `--keep-audio-icon` leaves it where it is. The icon is hidden during the slide show either way.
 
 Data recorded together with the old audio is also removed from a narrated slide, because its timing belongs to that audio: the laser-pointer path (`p14:laserTraceLst`) and the recorded play/pause/seek events (`p14:showEvtLst`). `--remove-recorded pointer|events|none` narrows or disables this (default: `all`). Ink annotations are kept and reported. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
 
@@ -157,39 +158,63 @@ Today we talk about genome editing.
 今日はゲノム編集について話します。
 ```
 
-Keep the marker lines when editing such notes in PowerPoint. When `--extract` finds this layout, only the source part is used as the note to translate. The narration part is restored as the existing translation, including edits made in PowerPoint, as long as the source part is unchanged (the hash identifies the translated version). If the source part was edited, the old narration is set aside as `slide_N_<lang>.stale.txt` and `--translate` produces a new translation. Spoken-form narration (`spoken` in the marker) is never restored.
+Keep the marker lines when editing such notes in PowerPoint. When `extract` finds this layout, only the source part is used as the note to translate. The narration part is restored as the existing translation, including edits made in PowerPoint, as long as the source part is unchanged (the hash identifies the translated version). If the source part was edited, the old narration is set aside as `slide_N_<lang>.stale.txt` and `translate` produces a new translation. Spoken-form narration (`spoken` in the marker) is never restored.
 
 ## Command-line reference
 
-| Option | Description |
-|---|---|
-| `--pptx` | Input deck (required) |
-| `--workspace` | Workspace directory (default: `workspace_<name>_<timestamp>`) |
-| `--slides` | Slide selection, e.g. `1-5`, `1,3,5-` |
-| `--extract` / `--scan` / `--translate` / `--tts` / `--verify` / `--pack` | Pipeline steps, executed in this order |
-| `--retranslate` | With `--translate`, overwrite existing translations |
-| `--source-lang` | Language of the notes (default: `auto`) |
-| `--target-lang` | Narration language (default: `--source-lang` if given, otherwise `en`) |
-| `--dict-file` | Dictionary of string replacements (repeatable); applied to the notes before `--translate` and to the narration text before `--tts` |
-| `--letter-map` | JSON letter-reading map |
-| `--engine {gpt_sovits,qwen3}` | TTS engine (default: `gpt_sovits`) |
-| `--ref-wav`, `--ref-text-file` | Reference recording and its transcript (required with `--tts`) |
-| `--ref-lang` | Language of the reference recording, GPT-SoVITS only (default: `ja`) |
-| `--api-url`, `--model` | GPT-SoVITS server URL and model (`v2ProPlus`, `v4`, `v1_clear`) |
-| `--qwen3-model-size {0.6B,1.7B}`, `--qwen3-device` | Qwen3-TTS model and device (`auto`, `cuda:0`, `mps`, `cpu`) |
-| `--enable-drc`, `--drc-threshold`, `--drc-ratio` | Dynamic range compression of the output |
-| `--asr-model`, `--asr-device` | faster-whisper model size and device |
-| `--verify-threshold` | Flag slides with similarity below this value (default: 0.85) |
-| `--min-difference` | Shortest difference to list in `verify_differences...csv` (default: 4 characters) |
-| `--max-difference` | Flag a slide when one stretch of the narration differs from the transcript over more than this many characters (default: 40; `0` disables) |
-| `--cer-threshold` | Also flag slides with CER above this value (default: off) |
-| `--out` | Output deck for `--pack` (default: `output.pptx`) |
-| `--writeback-notes`, `--use-spoken-notes` | Write the narration (or its rewritten form) into the notes on `--pack` |
-| `--slide-pause` | Seconds between the end of the narration and the automatic slide advance (default: 1.0) |
-| `--keep-audio-icon` | Leave the audio icon on the slide instead of parking it outside the visible area |
-| `--remove-recorded` | `all` (default), `pointer`, `events` or `none`: what to remove of the data recorded with the previous slide show |
+```
+pptx-narrator COMMAND [INPUT] [OPTIONS]
+```
 
-Run `pptx-narrator --help` for details. Underscore spellings (`--dict_file`, `--target_lang`, …) are also accepted.
+`COMMAND` is one of `extract`, `scan`, `translate`, `synthesize`, `verify`, `pack`; nothing runs unless a command
+says so. `INPUT` is a file or a directory: a directory is processed as a whole, a file on its own, so one slide is
+redone by naming its file (`pptx-narrator synthesize ws/slide_4_ja.txt`). If `INPUT` is omitted, the input recorded
+by the previous run of that command is reused, but only after its SHA-256 still matches; a changed input has to be
+named again.
+
+The two language options mean the same thing in every command: `--in-lang` is the language of the data the command
+reads, `--out-lang` the language of the data it writes. Each command accepts only the options it needs.
+
+| Command | INPUT | Options |
+|---|---|---|
+| `extract` | PPTX | `--in-lang` (languages to extract, e.g. `ja` or `ja,en`; omitted = every language found), `--workspace`, `--slides` |
+| `scan` | text file or workspace | `--in-lang`, `--dict-file`, `--scan-compounds`, `--workspace` |
+| `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate` |
+| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}`, `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}`, `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio` |
+| `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off) |
+| `pack` | PPTX | `--workspace`, `--out` (default `output.pptx`), `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--slides`, `--writeback-notes`, `--use-spoken-notes`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`) |
+
+`--config FILE` and `--version` are accepted before the command. Run `pptx-narrator COMMAND --help` for the full
+list. Underscore spellings (`--dict_file`, `--in_lang`, …) are also accepted.
+
+## Configuration
+
+Parameters that stay the same from run to run go into a TOML file, so that a command line carries only what changes.
+`--config FILE` names it; otherwise `pptx_narrator.toml` in the current directory is used when it exists. A `[common]`
+section applies to every command, and a section named after a command applies to that command and overrides `[common]`:
+
+```toml
+[common]
+in_lang = "ja"
+workspace = "ws"
+
+[synthesize]
+engine = "qwen3"
+ref_wav = "my_voice.wav"
+ref_text_file = "my_voice.txt"
+dict_file = "readings_ja.csv"
+
+[verify]
+cer_threshold = 0.15
+```
+
+With that file, step 3 of the quick start is `pptx-narrator synthesize ws` and `pptx-narrator verify ws`.
+
+Values are resolved in one order: **built-in defaults → configuration file → command line**, the command line winning.
+After every run the result is written to `.pptx_narrator_resolved.toml`: every parameter with the value actually used,
+the version of the tool, the time, and the path, size and SHA-256 of each input file. That file is itself a valid
+configuration file, so a run can be repeated later from it, and it records what produced a given narration.
+`.pptx_narrator_state.json` holds the last input of each command and is what the SHA-256 check above compares against.
 
 ### Verification report
 
@@ -198,7 +223,7 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 ## Limitations
 
 - Kana comparison cannot detect pitch-accent errors, and character comparison cannot detect prosody errors. ASR errors, and numbers or units written differently by the ASR (e.g. "5 mg" vs. "five milligrams"), can cause false flags; flagged slides should be checked by listening.
-- Automatic language identification can fail for notes mixing several languages or for very short notes in decks without other notes; check the file names after `--extract` or give `--source-lang`.
+- Automatic language identification can fail for notes mixing several languages or for very short notes in decks without other notes; check the file names after `extract` or give `--in-lang`.
 - Machine translation should be reviewed before synthesis; terms replaced before translation can still be altered by the translator.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
 
@@ -207,7 +232,7 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 `examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the sequence the check compares (katakana for Japanese, normalized text otherwise) -- a run of characters deleted, as when a phrase is skipped, or replaced by other characters, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note. Sizes are in characters of that sequence, so 3 characters is about one short term and 50 is about one sentence:
 
 ```bash
-python examples/screening_check.py --workspace ws --target-lang ja --asr-model small --asr-device cuda
+python examples/screening_check.py --workspace ws --in-lang ja --asr-model small --asr-device cuda
 ```
 
 The workspace is not modified; `--sizes` and `--repeats` set the error sizes in characters and the number of random positions per slide and size. The result says for which note lengths a given error is large enough to cross the threshold, which is what the threshold has to be chosen against. If faster-whisper cannot load the CUDA libraries (`libcublas.so.12 is not found`), use `--asr-device cpu` or install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.

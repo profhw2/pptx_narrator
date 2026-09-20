@@ -763,15 +763,31 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     if source_lang == "auto":
         languages = detect_note_languages(plain, known={n: i["source_lang"] for n, i in structured.items()})
     else:
-        languages = {n: source_lang for n in plain}
+        # An explicit language is a selector. Do not relabel a note merely because
+        # the caller requested a language; retain only notes whose detected language
+        # agrees with the request. Short/ambiguous notes are accepted when the
+        # detector cannot make a confident distinction and the requested language
+        # is the only explicit choice.
+        languages = {}
+        for n, txt in plain.items():
+            detected, confident = detect_language(txt)
+            if confident and base_lang(detected) != base_lang(source_lang):
+                logger.info(f"Slide #{n}: note detected as '{detected}', not requested '{source_lang}' (skipped)")
+                continue
+            languages[n] = source_lang
 
     for slide_num, txt in plain.items():
+        if slide_num not in languages:
+            continue
         name = text_filename(slide_num, languages[slide_num])
         with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
             f.write(txt)
         logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {languages[slide_num]}).")
 
     for slide_num, info in structured.items():
+        if source_lang != "auto" and base_lang(info["source_lang"]) != base_lang(source_lang):
+            logger.info(f"Slide #{slide_num}: structured note source is '{info['source_lang']}', not requested '{source_lang}' (skipped)")
+            continue
         src_lang = info["source_lang"] if source_lang == "auto" else source_lang
         languages[slide_num] = src_lang
         src_name = text_filename(slide_num, src_lang)
@@ -1716,23 +1732,251 @@ def _zip_package(pkg_dir, zip_path):
 # ==========================================
 # Main CLI
 # ==========================================
-DESCRIPTION = """\
-PPTX-Narrator: automated narration of PowerPoint presenter notes
------------------------------------------------------------------
-[Narration in the language of the notes]
- 1. pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja --extract --scan --dict-file readings_ja.csv
- 2. Review ws/slide_N_<lang>.txt and readings_ja.csv by hand
- 3. pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja --dict-file readings_ja.csv \\
-      --tts --verify --pack --out narrated.pptx --ref-wav ref.wav --ref-text-file ref.txt
-[Translated narration] translation and synthesis are separate runs with their own dictionaries:
- 1. pptx-narrator --pptx deck.pptx --workspace ws --target-lang de --extract --scan --dict-file terms_ja_de.csv
- 2. (review terms_ja_de.csv) pptx-narrator ... --target-lang de --translate --dict-file terms_ja_de.csv
- 3. pptx-narrator --pptx deck.pptx --workspace ws --target-lang de --scan --dict-file readings_de.csv
- 4. (review readings_de.csv) pptx-narrator --pptx deck.pptx --workspace ws --target-lang de --dict-file readings_de.csv \\
-      --tts --verify --pack --writeback-notes --out deck_de.pptx --ref-wav ref.wav --ref-text-file ref.txt
-Options are written with hyphens; the underscore spellings
-(e.g. --dict_file, --verify_threshold) are also accepted.
+DESCRIPTION = """PPTX-Narrator: automated narration of PowerPoint presenter notes
+
+Usage:
+  pptx-narrator COMMAND [INPUT] [OPTIONS]
+
+Commands:
+  extract      Extract presenter notes from a PPTX into language-tagged text files.
+  scan         Scan text input for technical terms and update a dictionary.
+  translate   Translate text input from --in-lang to --out-lang.
+  synthesize  Generate voice-cloned narration from text input.
+  verify      ASR round-trip verification of generated narration.
+  pack        Embed generated narration into a PPTX.
+
+INPUT may be a file or directory. A directory is processed using the file types
+accepted by the command. If INPUT is omitted, the last explicit input for that
+command is reused only after its identity has been verified with SHA-256.
 """
+
+
+# Configuration and execution-state files are deliberately separate.  The config
+# is user-authored; the state is maintained by the program and records the last
+# explicit inputs and their identities.
+STATE_FILE = ".pptx_narrator_state.json"
+RESOLVED_CONFIG_FILE = ".pptx_narrator_resolved.toml"
+
+
+def _load_toml(path):
+    if not path:
+        return {}
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
+    except ModuleNotFoundError:
+        raise RuntimeError("TOML configuration requires Python 3.11+ or the 'tomli' package")
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _deep_update(base, update):
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _load_config(path):
+    """Load explicit config, or the conventional local config when present."""
+    if path:
+        if not os.path.exists(path):
+            raise RuntimeError(f"config file not found: {path}")
+        return _load_toml(path), os.path.abspath(path)
+    default = os.path.abspath("pptx_narrator.toml")
+    if os.path.exists(default):
+        return _load_toml(default), default
+    return {}, None
+
+
+def _load_state(path=STATE_FILE):
+    if not os.path.exists(path):
+        return {"version": 1, "commands": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        state.setdefault("version", 1)
+        state.setdefault("commands", {})
+        return state
+    except Exception as e:
+        raise RuntimeError(f"could not read state file '{path}': {e}")
+
+
+def _save_state(state, path=STATE_FILE):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _input_snapshot(path, command):
+    """Return a content-identity snapshot for a file or a command-relevant directory."""
+    path = os.path.abspath(path)
+    if os.path.isfile(path):
+        return {
+            "path": path,
+            "kind": "file",
+            "mtime": os.path.getmtime(path),
+            "sha256": _sha256_file(path),
+        }
+    if os.path.isdir(path):
+        extensions = {
+            "scan": {".txt"},
+            "translate": {".txt"},
+            "synthesize": {".txt"},
+            "verify": {".m4a", ".txt"},
+        }.get(command, None)
+        files = []
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            if not os.path.isfile(full):
+                continue
+            if extensions is not None and os.path.splitext(name)[1].lower() not in extensions:
+                continue
+            files.append({
+                "path": os.path.abspath(full),
+                "mtime": os.path.getmtime(full),
+                "sha256": _sha256_file(full),
+            })
+        return {"path": path, "kind": "directory", "files": files}
+    raise RuntimeError(f"input not found: {path}")
+
+
+def _snapshot_matches(saved, current):
+    if not saved or saved.get("kind") != current.get("kind") or saved.get("path") != current.get("path"):
+        return False
+    if current["kind"] == "file":
+        return saved.get("sha256") == current.get("sha256")
+    old = {x["path"]: x.get("sha256") for x in saved.get("files", [])}
+    new = {x["path"]: x.get("sha256") for x in current.get("files", [])}
+    return old == new
+
+
+def _resolve_input(command, explicit_input, state):
+    """Resolve explicit input or a verified last input for this command."""
+    if explicit_input:
+        snap = _input_snapshot(explicit_input, command)
+        return snap["path"], snap
+    saved = state.get("commands", {}).get(command, {}).get("input")
+    if not saved:
+        raise RuntimeError(f"no previous input is recorded for '{command}'; specify INPUT explicitly")
+    current = _input_snapshot(saved["path"], command)
+    if not _snapshot_matches(saved, current):
+        raise RuntimeError(
+            f"the previously used input for '{command}' has changed; specify INPUT explicitly"
+        )
+    return current["path"], current
+
+
+
+
+def _validate_input_language(path, command, in_lang):
+    """Reject an explicitly language-tagged input whose language contradicts --in-lang."""
+    if not in_lang or command == "extract":
+        return
+    langs = [in_lang] if isinstance(in_lang, str) else list(in_lang)
+    wanted = {base_lang(x) for x in langs}
+    candidates = []
+    if os.path.isfile(path):
+        candidates = [os.path.basename(path)]
+    elif os.path.isdir(path):
+        candidates = [n for n in os.listdir(path) if os.path.isfile(os.path.join(path, n))]
+    tagged = []
+    matched = []
+    for name in candidates:
+        m = _TEXT_FILE_RE.match(name)
+        if not m or not m.group(2):
+            # Audio filenames use the same slide_N_<lang> convention.
+            m2 = re.match(r"^slide_\d+_([A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})?)\.", name)
+            if not m2:
+                continue
+            actual = base_lang(normalize_lang(m2.group(1)))
+        else:
+            actual = base_lang(normalize_lang(m.group(2)))
+        tagged.append((name, actual))
+        if actual in wanted:
+            matched.append(name)
+    if os.path.isfile(path) and tagged and not matched:
+        name, actual = tagged[0]
+        raise RuntimeError(
+            f"input language mismatch: '{name}' is '{actual}', but --in-lang is '{in_lang}'"
+        )
+    if os.path.isdir(path) and tagged and not matched:
+        raise RuntimeError(
+            f"no input data matching --in-lang '{in_lang}' was found in '{path}'"
+        )
+
+
+def _record_input(state, command, snapshot, extra=None):
+    entry = dict(extra or {})
+    entry["input"] = snapshot
+    state.setdefault("commands", {})[command] = entry
+
+
+def _toml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        vals = [_toml_scalar(x) for x in value]
+        if any(x is None for x in vals):
+            return None
+        return "[" + ", ".join(vals) + "]"
+    return None
+
+
+def _write_toml_table(f, data, prefix=()):
+    scalars = []
+    tables = []
+    for key, value in data.items():
+        if isinstance(value, dict):
+            tables.append((key, value))
+        else:
+            scalars.append((key, value))
+    if prefix:
+        f.write("[" + ".".join(prefix) + "]\n")
+    for key, value in scalars:
+        rendered = _toml_scalar(value)
+        if rendered is not None:
+            f.write(f"{key} = {rendered}\n")
+    if scalars and tables:
+        f.write("\n")
+    for i, (key, value) in enumerate(tables):
+        _write_toml_table(f, value, prefix + (key,))
+        if i != len(tables) - 1:
+            f.write("\n")
+
+
+def _save_resolved_config(resolved, path=RESOLVED_CONFIG_FILE):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Resolved PPTX-Narrator configuration; all values are effective values.\n")
+        _write_toml_table(f, resolved)
+
+
+def _config_for_command(config, command):
+    common = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
+    section = config.get(command, {}) if isinstance(config.get(command, {}), dict) else {}
+    out = {}
+    _deep_update(out, common)
+    _deep_update(out, section)
+    return out
 
 
 def _add(group, *names, **kwargs):
@@ -1745,232 +1989,424 @@ def _add(group, *names, **kwargs):
     group.add_argument(*flags, **kwargs)
 
 
-def build_parser():
+def _add_common_options(parser, config_values):
+    parser.add_argument("--config", default=None,
+                        help="TOML configuration file (default: ./pptx_narrator.toml when present)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    # These are intentionally not parser defaults: config values and built-in defaults
+    # must be distinguishable when resolving the three configuration layers.
+    parser.set_defaults(_config_values=config_values)
+
+
+def _apply_cli_config_defaults(namespace, config_values):
+    """Apply command-section values only where argparse did not receive an explicit value."""
+    for key, value in config_values.items():
+        if hasattr(namespace, key) and getattr(namespace, key) is None:
+            setattr(namespace, key, value)
+
+
+def build_parser(config_values=None):
     parser = argparse.ArgumentParser(
         prog="pptx-narrator",
         description=DESCRIPTION,
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    _add_common_options(parser, config_values or {})
 
-    g_io = parser.add_argument_group("input / output")
-    g_io.add_argument("--pptx", required=True, help="Path to the input PPTX file (required)")
-    g_io.add_argument("--out", default="output.pptx", help="Output PPTX path for --pack (default: output.pptx)")
-    g_io.add_argument("--workspace",
-                      help="Workspace directory for intermediate files\n"
-                           "(default: creates workspace_<filename>_<timestamp>)")
-    g_io.add_argument("--slides", help="Slide range to process, e.g. '1-5' or '1,3,5-' (default: all)")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    g_steps = parser.add_argument_group("pipeline steps (combine as needed; executed in this order)")
-    g_steps.add_argument("--extract", action="store_true",
-                         help="Extract presenter notes (hidden slides are skipped)")
-    g_steps.add_argument("--scan", action="store_true",
-                         help="Scan for acronyms / technical terms / units and append new\n"
-                              "candidates to --dict-file. Scans the notes when combined with\n"
-                              "--translate, otherwise the narration text in --target-lang")
-    g_steps.add_argument("--translate", action="store_true",
-                         help="Translate the notes into --target-lang with Google Translate,\n"
-                              "after applying --dict-file to the notes")
-    g_steps.add_argument("--retranslate", action="store_true",
-                         help="With --translate, overwrite existing translations")
-    g_steps.add_argument("--tts", action="store_true", help="Synthesize narration audio with the selected engine")
-    g_steps.add_argument("--verify", action="store_true",
-                         help="ASR round-trip check: transcribe the audio with faster-whisper and\n"
-                              "report similarity and character error rate (CER) against the\n"
-                              "intended text (kana-level for Japanese, normalized characters otherwise)")
-    g_steps.add_argument("--pack", action="store_true",
-                         help="Replace the embedded audio of each slide and set slide timings")
+    # ---- extract ---------------------------------------------------------
+    p = sub.add_parser("extract", help="Extract presenter notes from a PPTX")
+    p.add_argument("input", nargs="?", help="Input PPTX file")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None,
+         help="Language(s) of notes to extract, e.g. ja or ja,en; omitted = all recognized languages")
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Output workspace directory (default: workspace_<filename>)")
+    _add(p, "--slides", dest="slides", default=None, help="Slide range, e.g. 1-5 or 1,3,5- (default: all)")
 
-    g_lang = parser.add_argument_group("languages")
-    _add(g_lang, "--source-lang", dest="source_lang", type=normalize_lang, default="auto",
-         help="Language of the presenter notes, e.g. ja, en, zh-CN, de (default: auto =\n"
-              "identified per note from its text; short notes take the deck's main language)")
-    _add(g_lang, "--target-lang", dest="target_lang", type=normalize_lang, default=None,
-         help="Narration language. Any Google Translate language for --translate;\n"
-              "for --tts it must be supported by the engine:\n"
-              "  qwen3: " + ", ".join(QWEN3_LANGUAGES) + "\n"
-              "  gpt_sovits: " + ", ".join(GPT_SOVITS_LANGUAGES) + "\n"
-              "(default: --source-lang if given, otherwise en)")
+    # ---- directory/text commands ---------------------------------------
+    p = sub.add_parser("scan", help="Scan text input for technical terms")
+    p.add_argument("input", nargs="?", help="Input text file or directory")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
+    _add(p, "--dict-file", dest="dict_file", action="append", default=None,
+         help="Dictionary CSV to update; repeatable")
+    _add(p, "--scan-compounds", dest="scan_compounds", action="store_true", default=None,
+         help="With Japanese input, propose Japanese compounds in the dictionary")
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Optional workspace associated with the input (normally not needed)")
 
-    g_text = parser.add_argument_group("text normalization")
-    _add(g_text, "--scan-compounds", dest="scan_compounds", action="store_true",
-         help="With --scan and Japanese narration, also write the compounds of the notes,\n"
-              "with the reading a Japanese front end assembles for them, as comment lines in\n"
-              "the dictionary. They do nothing until the '#' is removed, so the list can be\n"
-              "long; it is where unsettled readings such as 二本鎖 show up")
-    _add(g_text, "--dict-file", dest="dict_file", action="append", default=None,
-         help="Dictionary CSV of string replacements (string,replacement,type), repeatable.\n"
-              "Applied to the notes before --translate and to the narration text before --tts\n"
-              "(run them separately to use different dictionaries)")
-    _add(g_text, "--letter-map", dest="letter_map",
-         help="JSON mapping of letters to readings in the narration language, used for\n"
-              "unknown unit symbols (e.g. examples/letter_map_ja.json)")
+    p = sub.add_parser("translate", help="Translate text input")
+    p.add_argument("input", nargs="?", help="Input text file or directory")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
+    _add(p, "--out-lang", dest="out_lang", type=normalize_lang, default=None, help="Language of the translated output")
+    _add(p, "--dict-file", dest="dict_file", action="append", default=None,
+         help="Dictionary CSV(s) applied before translation")
+    _add(p, "--retranslate", dest="retranslate", action="store_true", default=None,
+         help="Overwrite existing translations")
 
-    g_tts = parser.add_argument_group("speech synthesis")
-    g_tts.add_argument("--engine", choices=["gpt_sovits", "qwen3"], default="gpt_sovits",
-                       help="TTS engine for --tts (default: gpt_sovits)")
-    _add(g_tts, "--ref-wav", dest="ref_wav", help="Reference recording (.wav) of the voice to clone")
-    _add(g_tts, "--ref-text-file", dest="ref_text_file", help="Text file containing the transcript of --ref-wav")
-    _add(g_tts, "--ref-lang", dest="ref_lang", type=normalize_lang, default="ja",
-         help="Language of the reference recording, GPT-SoVITS only (default: ja)")
-    _add(g_tts, "--api-url", dest="api_url", default="http://127.0.0.1:9880/",
-         help="GPT-SoVITS API server URL (default: http://127.0.0.1:9880/)")
-    g_tts.add_argument("--model", default="v2ProPlus",
-                       help="GPT-SoVITS model: " + ", ".join(MODELS_CONFIG) + " (default: v2ProPlus)")
-    _add(g_tts, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default="1.7B",
-         help="Qwen3-TTS model size (default: 1.7B)")
-    _add(g_tts, "--qwen3-device", dest="qwen3_device", default="auto",
-         help="Device for Qwen3-TTS: auto / cuda:0 / mps / cpu (default: auto)")
-    _add(g_tts, "--enable-drc", dest="enable_drc", action="store_true",
-         help="Apply dynamic range compression to avoid volume drop at sentence ends")
-    _add(g_tts, "--drc-threshold", dest="drc_threshold", type=float, default=-20.0,
-         help="DRC threshold in dBFS (default: -20.0)")
-    _add(g_tts, "--drc-ratio", dest="drc_ratio", type=float, default=3.0,
-         help="DRC ratio (default: 3.0)")
+    p = sub.add_parser("synthesize", help="Generate voice-cloned narration")
+    p.add_argument("input", nargs="?", help="Input text file or directory")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input narration text")
+    _add(p, "--dict-file", dest="dict_file", action="append", default=None,
+         help="Dictionary CSV(s) applied before synthesis")
+    _add(p, "--letter-map", dest="letter_map", default=None,
+         help="JSON mapping of letters to readings")
+    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None, help="TTS engine")
+    _add(p, "--ref-wav", dest="ref_wav", default=None, help="Reference recording (.wav)")
+    _add(p, "--ref-text-file", dest="ref_text_file", default=None, help="Transcript of --ref-wav")
+    _add(p, "--ref-lang", dest="ref_lang", type=normalize_lang, default=None,
+         help="Language of reference recording for GPT-SoVITS")
+    _add(p, "--api-url", dest="api_url", default=None, help="GPT-SoVITS API server URL")
+    _add(p, "--model", default=None, help="GPT-SoVITS model")
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
+    _add(p, "--qwen3-device", dest="qwen3_device", default=None, help="auto / cuda:0 / mps / cpu")
+    _add(p, "--enable-drc", dest="enable_drc", action="store_true", default=None)
+    _add(p, "--drc-threshold", dest="drc_threshold", type=float, default=None)
+    _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None)
 
-    g_ver = parser.add_argument_group("verification")
-    _add(g_ver, "--asr-model", dest="asr_model", default="small",
-         help="faster-whisper model size: tiny/base/small/medium/large-v3 (default: small)")
-    _add(g_ver, "--asr-device", dest="asr_device", default="cpu", help="Device for the ASR model: cpu/cuda (default: cpu)")
-    _add(g_ver, "--verify-threshold", dest="verify_threshold", type=float, default=0.85,
-         help="Flag a slide when similarity (0-1) is below this value (default: 0.85)")
-    _add(g_ver, "--min-difference", dest="min_difference", type=int, default=4,
-         help="Shortest difference to list in verify_differences...csv (default: 4\n"
-              "characters); the list is what says where narration and text disagree")
-    _add(g_ver, "--max-difference", dest="max_difference", type=int, default=40,
-         help="Flag a slide when the narration and the transcript differ over a single\n"
-              "stretch longer than this many characters, whatever the slide's length\n"
-              "(default: 40; 0 turns it off). A dropped phrase makes one long stretch,\n"
-              "while recognition differences are short and scattered")
-    _add(g_ver, "--cer-threshold", dest="cer_threshold", type=float, default=None,
-         help="Additionally flag a slide when CER exceeds this value (default: not used)")
+    p = sub.add_parser("verify", help="Verify generated narration with ASR")
+    p.add_argument("input", nargs="?", help="Input audio/text directory or file")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration")
+    _add(p, "--model", default=None, help="TTS model label used in filenames")
+    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
+         help="TTS engine, used to derive the model label")
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
+    _add(p, "--asr-model", dest="asr_model", default=None)
+    _add(p, "--asr-device", dest="asr_device", default=None)
+    _add(p, "--verify-threshold", dest="verify_threshold", type=float, default=None)
+    _add(p, "--min-difference", dest="min_difference", type=int, default=None)
+    _add(p, "--max-difference", dest="max_difference", type=int, default=None)
+    _add(p, "--cer-threshold", dest="cer_threshold", type=float, default=None)
 
-    g_pack = parser.add_argument_group("packing")
-    _add(g_pack, "--writeback-notes", dest="writeback_notes", action="store_true",
-         help="Write the narration back into the slide notes. Translated (or spoken-form)\n"
-              "narration is written first and the original note is kept below it, separated\n"
-              "by '=== pptx-narrator: ... ===' marker lines that --extract recognizes")
-    _add(g_pack, "--use-spoken-notes", dest="use_spoken_notes", action="store_true",
-         help="With --writeback-notes, write the dictionary-normalized reading text instead")
-    _add(g_pack, "--slide-pause", dest="slide_pause", type=float, default=1.0,
-         help="Seconds to wait after the narration before the slide advances by itself\n"
-              "(default: 1.0), so that the last word is not cut off in a video")
-    _add(g_pack, "--keep-audio-icon", dest="keep_audio_icon", action="store_true",
-         help="Leave the audio icon of a narrated slide where it is. By default the icon is\n"
-              "parked next to the slide, outside the visible area, so that it does not cover\n"
-              "the slide content in the editor (it is hidden during the show either way)")
-    _add(g_pack, "--remove-recorded", dest="remove_recorded", default="all",
-         choices=["all", "pointer", "events", "none"],
-         help="What to remove from a narrated slide of the data recorded with the previous\n"
-              "slide show (default: all): 'pointer' the laser-pointer path, 'events' the\n"
-              "recorded play/pause/seek events. Their timing belongs to the old audio")
+    # ---- pack ------------------------------------------------------------
+    p = sub.add_parser("pack", help="Embed generated narration into a PPTX")
+    p.add_argument("input", nargs="?", help="Original/input PPTX file")
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Workspace containing generated text/audio (required unless recoverable from state)")
+    _add(p, "--out", default=None, help="Output PPTX path")
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration data being packed")
+    _add(p, "--model", default=None, help="TTS model label used in filenames")
+    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None)
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
+    _add(p, "--slides", dest="slides", default=None, help="Slide range")
+    _add(p, "--writeback-notes", dest="writeback_notes", action="store_true", default=None)
+    _add(p, "--use-spoken-notes", dest="use_spoken_notes", action="store_true", default=None)
+    _add(p, "--slide-pause", dest="slide_pause", type=float, default=None)
+    _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None)
+    _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"], default=None)
+
     return parser
 
 
-def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def _defaults():
+    return {
+        "extract": {"workspace": None, "slides": None},
+        "scan": {"scan_compounds": False},
+        "translate": {"retranslate": False, "dict_file": None},
+        "synthesize": {
+            "engine": "gpt_sovits", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/",
+            "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
+            "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
+            "letter_map": None,
+        },
+        "verify": {
+            "model": "v2ProPlus", "engine": "gpt_sovits", "qwen3_model_size": "1.7B",
+            "asr_model": "small", "asr_device": "cpu", "verify_threshold": 0.85,
+            "min_difference": 4, "max_difference": 40, "cer_threshold": None,
+        },
+        "pack": {
+            "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "gpt_sovits",
+            "qwen3_model_size": "1.7B", "slides": None, "writeback_notes": False,
+            "use_spoken_notes": False, "slide_pause": 1.0, "keep_audio_icon": False,
+            "remove_recorded": "all",
+        },
+    }
 
-    args.source_lang = args.source_lang or "auto"
-    if args.target_lang is None:
-        args.target_lang = args.source_lang if args.source_lang != "auto" else "en"
-        logger.info(f"[Target Lang] --target-lang was not specified. Defaulting to '{args.target_lang}'.")
-    else:
-        logger.info(f"[Target Lang] Target language explicitly set to: '{args.target_lang}'")
-    if args.target_lang == "auto":
-        parser.error("--target-lang cannot be 'auto'")
 
-    steps = [args.extract, args.scan, args.translate, args.tts, args.verify, args.pack]
-    if not any(steps):
-        parser.error("no pipeline step selected; use at least one of "
-                     "--extract, --scan, --translate, --tts, --verify, --pack")
-    if not os.path.exists(args.pptx):
-        parser.error(f"input PPTX not found: {args.pptx}")
-    if args.scan and not args.dict_file:
-        parser.error("--scan needs --dict-file (the dictionary new candidates are added to)")
-    if args.translate and args.source_lang != "auto" and lang_suffix(args.source_lang) == lang_suffix(args.target_lang):
-        parser.error("--translate needs --target-lang to differ from --source-lang")
-    if args.tts:
-        missing = [flag for flag, value in (("--ref-wav", args.ref_wav),
-                                            ("--ref-text-file", args.ref_text_file)) if not value]
+def _merge_effective(command, args, config, parser):
+    values = _defaults().get(command, {}).copy()
+    cfg = _config_for_command(config, command)
+    _deep_update(values, cfg)
+    for key, value in vars(args).items():
+        if key.startswith("_") or key in {"command", "input", "config"}:
+            continue
+        # argparse uses None for omitted optional values; boolean flags also use None here.
+        if value is not None:
+            values[key] = value
+    return values
+
+
+def _validate_and_normalize(command, v, parser):
+    if command == "extract":
+        if v.get("in_lang"):
+            raw = v["in_lang"]
+            if isinstance(raw, str):
+                raw = raw.split(",")
+            v["in_lang"] = [normalize_lang(x) for x in raw if normalize_lang(x)]
+    elif command == "translate":
+        if not v.get("in_lang") or not v.get("out_lang"):
+            parser.error("translate requires --in-lang and --out-lang")
+        if v["in_lang"] == "auto" or v["out_lang"] == "auto":
+            parser.error("--in-lang/--out-lang cannot be 'auto'")
+        if lang_suffix(v["in_lang"]) == lang_suffix(v["out_lang"]):
+            parser.error("translate requires different --in-lang and --out-lang")
+    elif command in {"scan", "synthesize", "verify", "pack"}:
+        if not v.get("in_lang"):
+            parser.error(f"{command} requires --in-lang")
+        if v["in_lang"] == "auto":
+            parser.error("--in-lang cannot be 'auto'")
+    if command in {"scan", "translate", "synthesize"} and isinstance(v.get("dict_file"), str):
+        v["dict_file"] = [v["dict_file"]]
+    if command == "scan" and not v.get("dict_file"):
+        parser.error("scan requires --dict-file")
+    if command == "synthesize":
+        missing = [flag for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text-file", "ref_text_file")) if not v.get(key)]
         if missing:
-            parser.error("--tts requires " + " and ".join(missing))
-        if args.engine == "qwen3" and qwen3_language(args.target_lang) is None:
-            parser.error(f"Qwen3-TTS does not support '{args.target_lang}' "
-                         f"(supported: {', '.join(QWEN3_LANGUAGES)})")
-        if args.engine == "gpt_sovits":
-            for flag, code in (("--target-lang", args.target_lang), ("--ref-lang", args.ref_lang)):
+            parser.error("synthesize requires " + " and ".join(missing))
+        if v["engine"] == "qwen3" and qwen3_language(v["in_lang"]) is None:
+            parser.error(f"Qwen3-TTS does not support '{v['in_lang']}' (supported: {', '.join(QWEN3_LANGUAGES)})")
+        if v["engine"] == "gpt_sovits":
+            for flag, code in (("--in-lang", v["in_lang"]), ("--ref-lang", v["ref_lang"])):
                 if gpt_sovits_language(code) is None:
-                    parser.error(f"GPT-SoVITS does not support {flag} '{code}' "
-                                 f"(supported: {', '.join(GPT_SOVITS_LANGUAGES)})")
-    if args.engine == "gpt_sovits" and args.model not in MODELS_CONFIG:
-        parser.error(f"unknown GPT-SoVITS model '{args.model}' (available: {', '.join(MODELS_CONFIG)})")
+                    parser.error(f"GPT-SoVITS does not support {flag} '{code}' (supported: {', '.join(GPT_SOVITS_LANGUAGES)})")
+            if v["model"] not in MODELS_CONFIG:
+                parser.error(f"unknown GPT-SoVITS model '{v['model']}' (available: {', '.join(MODELS_CONFIG)})")
+    if command == "verify":
+        if v["engine"] == "qwen3":
+            v["model"] = f"qwen3-{v['qwen3_model_size']}"
+    if command == "pack" and v["engine"] == "qwen3":
+        v["model"] = f"qwen3-{v['qwen3_model_size']}"
+    return v
 
-    if args.tts and args.engine == "gpt_sovits":
-        config = MODELS_CONFIG[args.model]
-        base_url = args.api_url.rstrip("/")
-        logger.info(f"Switching GPT-SoVITS weights to {args.model}...")
-        try:
-            requests.get(f"{base_url}/set_gpt_weights", params={"weights_path": config["gpt"]}, timeout=300)
-            requests.get(f"{base_url}/set_sovits_weights", params={"weights_path": config["sovits"]}, timeout=300)
-        except requests.RequestException as e:
-            logger.error(f"Could not reach the GPT-SoVITS API server at {args.api_url}: {e}")
-            sys.exit(1)
 
-    if args.workspace:
-        workspace_dir = args.workspace
-    else:
-        base_name = os.path.splitext(os.path.basename(args.pptx))[0]
-        workspace_dir = f"workspace_{base_name}_{int(time.time())}"
-    os.makedirs(workspace_dir, exist_ok=True)
+def main(argv=None):
+    # Parse command first without loading a config so --config can be honored cleanly.
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config")
+    bootstrap.add_argument("command", nargs="?")
+    bootstrap.add_argument("input", nargs="?")
+    boot, _ = bootstrap.parse_known_args(argv)
+    try:
+        config, config_path = _load_config(boot.config)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
 
-    prs = Presentation(args.pptx)
-    req_slides = sorted(parse_slide_ranges(args.slides, len(prs.slides)))
+    parser = build_parser(config)
+    args = parser.parse_args(argv)
+    command = args.command
+    effective = _merge_effective(command, args, config, parser)
+    effective = _validate_and_normalize(command, effective, parser)
 
-    model_label = f"qwen3-{args.qwen3_model_size}" if args.engine == "qwen3" else args.model
-    lang = args.target_lang
-    letter_map_data = load_letter_map(args.letter_map)
-    # The dictionary rewrites the notes before --translate and the narration text before --tts.
-    dictionaries = load_dictionaries(args.dict_file, lang)
+    state = _load_state()
+    try:
+        input_path, input_snapshot = _resolve_input(command, args.input, state)
+        _validate_input_language(input_path, command, effective.get("in_lang"))
+    except RuntimeError as e:
+        parser.error(str(e))
 
-    if args.extract:
-        step_extract_notes(args.pptx, workspace_dir, req_slides, args.source_lang)
-    if args.scan:
-        step_scan_and_update_dict(workspace_dir, args.dict_file[0], dictionaries, req_slides, lang,
-                                  source_lang=args.source_lang, for_translation=args.translate,
-                                  propose_compounds=args.scan_compounds)
-    if args.translate:
-        step_translate_notes(workspace_dir, req_slides, args.source_lang, lang,
-                             dictionary=dictionaries, overwrite=args.retranslate)
-    if args.tts:
-        if args.engine == "qwen3":
-            step_generate_audio_qwen3(
-                workspace_dir, req_slides, lang, args.ref_wav, args.ref_text_file,
-                dictionaries, model_label, args.qwen3_model_size, args.qwen3_device,
-                enable_drc=args.enable_drc, drc_threshold=args.drc_threshold, drc_ratio=args.drc_ratio,
-                letter_map=letter_map_data,
-            )
+    # extract writes a workspace; all text/audio commands operate directly on their
+    # INPUT directory. pack consumes a PPTX and a workspace containing generated assets.
+    workspace_dir = effective.get("workspace")
+    if command == "extract":
+        if not os.path.isfile(input_path) or not input_path.lower().endswith(".pptx"):
+            parser.error("extract INPUT must be a PPTX file")
+        if not workspace_dir:
+            workspace_dir = os.path.join(os.path.dirname(input_path),
+                                         "workspace_" + os.path.splitext(os.path.basename(input_path))[0])
+        workspace_dir = os.path.abspath(workspace_dir)
+        os.makedirs(workspace_dir, exist_ok=True)
+        prs = Presentation(input_path)
+        req_slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
+        langs = effective.get("in_lang")
+        if not langs:
+            step_extract_notes(input_path, workspace_dir, req_slides, "auto")
         else:
-            step_generate_audio(
-                workspace_dir, req_slides, lang, args.ref_wav, args.ref_text_file, args.ref_lang,
-                args.api_url, dictionaries, model_label,
-                enable_drc=args.enable_drc, drc_threshold=args.drc_threshold, drc_ratio=args.drc_ratio,
-                letter_map=letter_map_data,
-            )
-    if args.verify:
-        step_verify_audio(workspace_dir, req_slides, lang, model_label,
-                          args.asr_model, args.asr_device, args.verify_threshold, args.cer_threshold,
-                          max_difference=args.max_difference or None,
-                          min_difference=args.min_difference)
-    if args.pack:
-        step_pack_pptx(
-            args.pptx, args.out, workspace_dir, req_slides, lang, model_label,
-            source_lang=args.source_lang,
-            writeback_notes=args.writeback_notes, use_spoken_notes=args.use_spoken_notes,
-            remove_recorded=RECORDED_CHOICES[args.remove_recorded],
-            icon_outside=not args.keep_audio_icon,
-            pause_ms=int(round(args.slide_pause * 1000)),
-        )
+            # Extract each requested language independently. A PPTX may legitimately
+            # contain notes in several languages; each requested language is therefore
+            # a selector, not a claim that every note in the deck has that language.
+            # A requested language the deck does not contain is an error: the run would
+            # otherwise report success while producing nothing for that language.
+            missing = []
+            for lang in langs:
+                step_extract_notes(input_path, workspace_dir, req_slides, lang)
+                if not any(_TEXT_FILE_RE.match(n) and normalize_lang(_TEXT_FILE_RE.match(n).group(2) or "ja") == lang
+                           for n in os.listdir(workspace_dir)):
+                    missing.append(lang)
+            if missing:
+                parser.error("no note in " + ", ".join(missing) + " was found in " + os.path.basename(input_path))
+        _record_input(state, command, input_snapshot, {"workspace": workspace_dir})
+    else:
+        file_workspace_tmp = None
+        original_file_input = None
+        if command in {"scan", "translate", "synthesize", "verify"}:
+            if os.path.isdir(input_path):
+                workspace_dir = input_path
+            elif os.path.isfile(input_path):
+                original_file_input = input_path
+                file_workspace_tmp = _prepare_file_workspace(command, input_path, effective.get("in_lang"))
+                workspace_dir = file_workspace_tmp
+            else:
+                parser.error(f"{command} INPUT must be a file or directory")
+        elif command == "pack":
+            if not os.path.isfile(input_path) or not input_path.lower().endswith(".pptx"):
+                parser.error("pack INPUT must be a PPTX file")
+            if not workspace_dir:
+                # Prefer the workspace associated with the most recent extract of this PPTX.
+                extract_state = state.get("commands", {}).get("extract", {})
+                if extract_state.get("input") and _snapshot_matches(extract_state["input"], input_snapshot):
+                    workspace_dir = extract_state.get("workspace")
+            if not workspace_dir or not os.path.isdir(workspace_dir):
+                parser.error("pack requires --workspace unless a matching extract workspace is available")
+            workspace_dir = os.path.abspath(workspace_dir)
+
+    if command == "extract":
+        effective["workspace"] = workspace_dir
+    if command in {"scan", "translate", "synthesize", "verify", "pack"}:
+        # For directories, the command's INPUT is the processing workspace; for pack it is the PPTX.
+        pass
+
+    # The remaining command implementations operate on the existing workspace-based functions.
+    if command == "scan":
+        dictionaries = load_dictionaries(effective["dict_file"], effective["in_lang"])
+        step_scan_and_update_dict(workspace_dir, effective["dict_file"][0], dictionaries,
+                                  sorted(_slides_from_workspace(workspace_dir)), effective["in_lang"],
+                                  source_lang=effective["in_lang"], for_translation=False,
+                                  propose_compounds=effective["scan_compounds"])
+    elif command == "translate":
+        slides = sorted(_slides_from_workspace(workspace_dir))
+        dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
+        step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
+                             dictionary=dictionaries, overwrite=effective["retranslate"])
+    elif command == "synthesize":
+        slides = sorted(_slides_from_workspace(workspace_dir))
+        dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
+        letter_map_data = load_letter_map(effective.get("letter_map"))
+        if effective["engine"] == "gpt_sovits":
+            config_model = MODELS_CONFIG[effective["model"]]
+            base_url = effective["api_url"].rstrip("/")
+            logger.info(f"Switching GPT-SoVITS weights to {effective['model']}...")
+            try:
+                requests.get(f"{base_url}/set_gpt_weights", params={"weights_path": config_model["gpt"]}, timeout=300)
+                requests.get(f"{base_url}/set_sovits_weights", params={"weights_path": config_model["sovits"]}, timeout=300)
+            except requests.RequestException as e:
+                parser.error(f"Could not reach the GPT-SoVITS API server at {effective['api_url']}: {e}")
+        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        if effective["engine"] == "qwen3":
+            step_generate_audio_qwen3(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
+                                      effective["ref_text_file"], dictionaries, model_label,
+                                      effective["qwen3_model_size"], effective["qwen3_device"],
+                                      enable_drc=effective["enable_drc"], drc_threshold=effective["drc_threshold"],
+                                      drc_ratio=effective["drc_ratio"], letter_map=letter_map_data)
+        else:
+            step_generate_audio(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
+                                effective["ref_text_file"], effective["ref_lang"], effective["api_url"],
+                                dictionaries, model_label, enable_drc=effective["enable_drc"],
+                                drc_threshold=effective["drc_threshold"], drc_ratio=effective["drc_ratio"],
+                                letter_map=letter_map_data)
+    elif command == "verify":
+        slides = sorted(_slides_from_workspace(workspace_dir))
+        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        step_verify_audio(workspace_dir, slides, effective["in_lang"], model_label,
+                          effective["asr_model"], effective["asr_device"], effective["verify_threshold"],
+                          effective["cer_threshold"], max_difference=effective["max_difference"] or None,
+                          min_difference=effective["min_difference"])
+    elif command == "pack":
+        prs = Presentation(input_path)
+        slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
+        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        output = os.path.abspath(effective["out"])
+        # pack uses the narration language as its input-data language.
+        step_pack_pptx(input_path, output, workspace_dir, slides, effective["in_lang"], model_label,
+                       source_lang="auto", writeback_notes=effective["writeback_notes"],
+                       use_spoken_notes=effective["use_spoken_notes"],
+                       remove_recorded=RECORDED_CHOICES[effective["remove_recorded"]],
+                       icon_outside=not effective["keep_audio_icon"],
+                       pause_ms=int(round(effective["slide_pause"] * 1000)))
+
+    if command in {"scan", "translate", "synthesize", "verify"} and '"'"'file_workspace_tmp'"'"' in locals() and file_workspace_tmp:
+        _sync_file_workspace(file_workspace_tmp, original_file_input, os.path.basename(original_file_input))
+        shutil.rmtree(file_workspace_tmp, ignore_errors=True)
+
+    # Record the explicit/reused input and the fully resolved effective configuration.
+    _record_input(state, command, input_snapshot,
+                  {"workspace": workspace_dir} if workspace_dir else {})
+    state["commands"][command]["resolved_config"] = effective
+    state["commands"][command]["software_version"] = __version__
+    state["commands"][command]["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    _save_state(state)
+
+    metadata = {
+        "software_version": __version__,
+        "generated_at": state["commands"][command]["generated_at"],
+        "command": command,
+        "config_file": config_path or "",
+        "input_path": input_snapshot.get("path", ""),
+        "input_kind": input_snapshot.get("kind", ""),
+    }
+    if input_snapshot.get("kind") == "file":
+        metadata["input_sha256"] = input_snapshot.get("sha256", "")
+    else:
+        metadata["input_files_json"] = json.dumps(input_snapshot.get("files", []), ensure_ascii=False, sort_keys=True)
+    resolved = {"metadata": metadata, command: effective}
+    _save_resolved_config(resolved)
+
+
+def _prepare_file_workspace(command, input_path, in_lang=None):
+    """Create an isolated one-file workspace so file INPUT never processes neighbors."""
+    tmp = tempfile.mkdtemp(prefix="pptx_narrator_")
+    name = os.path.basename(input_path)
+    shutil.copy2(input_path, os.path.join(tmp, name))
+
+    # Commands that need a paired artifact (verify) get only the corresponding
+    # slide/model files from the original directory. Translation also gets an
+    # existing target file and manifest so its normal overwrite/skip semantics
+    # are preserved.
+    if command == "verify":
+        m = re.match(r"^slide_(\d+)(?:_[^.]+)?\.[^.]+$", name)
+        if m:
+            prefix = f"slide_{m.group(1)}_"
+            for sibling in os.listdir(os.path.dirname(input_path)):
+                if sibling.startswith(prefix) and os.path.isfile(os.path.join(os.path.dirname(input_path), sibling)):
+                    if sibling != name:
+                        shutil.copy2(os.path.join(os.path.dirname(input_path), sibling), os.path.join(tmp, sibling))
+    elif command == "translate":
+        m = _TEXT_FILE_RE.match(name)
+        if m:
+            prefix = f"slide_{m.group(1)}_"
+            for sibling in os.listdir(os.path.dirname(input_path)):
+                if sibling.startswith(prefix) and sibling != name and os.path.isfile(os.path.join(os.path.dirname(input_path), sibling)):
+                    shutil.copy2(os.path.join(os.path.dirname(input_path), sibling), os.path.join(tmp, sibling))
+        manifest = os.path.join(os.path.dirname(input_path), TRANSLATION_MANIFEST)
+        if os.path.exists(manifest):
+            shutil.copy2(manifest, os.path.join(tmp, TRANSLATION_MANIFEST))
+    return tmp
+
+
+def _sync_file_workspace(tmp, original_path, original_input_name):
+    """Copy generated artifacts from an isolated file workspace back beside INPUT."""
+    dest_dir = os.path.dirname(original_path) or "."
+    for name in os.listdir(tmp):
+        if name == original_input_name:
+            continue
+        src = os.path.join(tmp, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(dest_dir, name))
+
+
+def _slides_from_workspace(workspace_dir):
+    """Return slide numbers represented by language-tagged text/audio files in a workspace."""
+    slides = set()
+    if not os.path.isdir(workspace_dir):
+        return slides
+    for name in os.listdir(workspace_dir):
+        m = _TEXT_FILE_RE.match(name)
+        if m:
+            slides.add(int(m.group(1)))
+            continue
+        m = re.match(r"^slide_(\d+)(?:_[^.]+)?\.[^.]+$", name)
+        if m:
+            slides.add(int(m.group(1)))
+    return slides
 
 
 if __name__ == "__main__":

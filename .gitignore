@@ -27,3 +27,7 @@ dist/
 paper/
 _test_output/
 Claude outputs/
+
+# per-run execution state and resolved parameters
+.pptx_narrator_state.json
+.pptx_narrator_resolved.toml
