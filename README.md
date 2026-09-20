@@ -210,7 +210,11 @@ cer_threshold = 0.15
 
 With that file, step 3 of the quick start is `pptx-narrator synthesize ws` and `pptx-narrator verify ws`.
 
+Keys may be written with hyphens or underscores (`dict-file` and `dict_file` both work), as on the command line.
+
 Values are resolved in one order: **built-in defaults → configuration file → command line**, the command line winning.
+To take a configured value back for one run, give it empty (`--dict-file ''`); to turn off a switch the file sets, use
+its `--no-` form (`--no-writeback-notes`). `--config` may be written before or after the command.
 After every run the result is written to `.pptx_narrator_resolved.toml`: every parameter with the value actually used,
 the version of the tool, the time, and the path, size and SHA-256 of each input file. That file is itself a valid
 configuration file, so a run can be repeated later from it, and it records what produced a given narration.

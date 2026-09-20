@@ -433,4 +433,16 @@ ok(eff["slide_pause"] == 3.5, "a [common] section applies to every command")
 args = parser.parse_args(["pack", deck, "--slide-pause", "0.5"])
 eff = pn._merge_effective("pack", args, {"pack": {"slide_pause": 2.5}}, parser)
 ok(eff["slide_pause"] == 0.5, "the command line overrides the configuration file")
+eff = pn._merge_effective("pack", parser.parse_args(["pack", deck, "--out", ""]),
+                          {"pack": {"out": "from_config.pptx"}}, parser)
+ok(eff["out"] is None, "an empty value on the command line takes a configured value back")
+cfg_true = {"pack": {"writeback_notes": True}}
+ok(pn._merge_effective("pack", parser.parse_args(["pack", deck]), cfg_true, parser)["writeback_notes"] is True
+   and pn._merge_effective("pack", parser.parse_args(["pack", deck, "--no-writeback-notes"]),
+                           cfg_true, parser)["writeback_notes"] is False,
+   "--no-... takes back a switch set in the configuration file")
+ok(pn._normalize_config_keys({"a-b": {"c-d": 1}}) == {"a_b": {"c_d": 1}},
+   "hyphenated keys in the configuration file are accepted")
+ok(parser.parse_args(["scan", "ws", "--config", "x.toml"]).config == "x.toml",
+   "--config may follow the command")
 print("ALL TESTS PASSED")

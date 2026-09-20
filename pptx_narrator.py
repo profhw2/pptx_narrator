@@ -1777,7 +1777,17 @@ def _load_toml(path):
     except ModuleNotFoundError:
         raise RuntimeError("TOML configuration requires Python 3.11+ or the 'tomli' package")
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        return _normalize_config_keys(tomllib.load(f))
+
+
+def _normalize_config_keys(data):
+    """Accept hyphenated keys in the configuration file (dict-file as well as dict_file).
+
+    TOML allows both spellings, and the command line accepts both, so the file should too.
+    """
+    if not isinstance(data, dict):
+        return data
+    return {str(k).replace("-", "_"): _normalize_config_keys(v) for k, v in data.items()}
 
 
 def _deep_update(base, update):
@@ -2012,13 +2022,24 @@ def _config_for_command(config, command):
 
 
 def _add(group, *names, **kwargs):
-    """Register an option under its hyphenated name plus the legacy underscore alias."""
+    """Register an option under its hyphenated name plus the underscore spelling.
+
+    A switch (store_true) also gets a --no-... counterpart, so that a value set to true
+    in the configuration file can be taken back on the command line.
+    """
     flags = list(names)
     for name in names:
         legacy = name.replace("-", "_").replace("__", "--", 1)
         if legacy != name and legacy not in flags:
             flags.append(legacy)
     group.add_argument(*flags, **kwargs)
+    if kwargs.get("action") == "store_true":
+        off = dict(kwargs)
+        off["action"] = "store_false"
+        off["help"] = argparse.SUPPRESS
+        neg = ["--no-" + names[0][2:]]
+        neg.append(neg[0].replace("-", "_").replace("__", "--", 1))
+        group.add_argument(*dict.fromkeys(neg), **off)
 
 
 def _add_common_options(parser, config_values):
@@ -2127,6 +2148,12 @@ def build_parser(config_values=None):
     _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None)
     _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"], default=None)
 
+
+    # --config is read from anywhere in the command line; accept it after the
+    # command as well, which is where people naturally write it.
+    for _sp in sub.choices.values():
+        _sp.add_argument("--config", default=None, help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -2163,8 +2190,14 @@ def _merge_effective(command, args, config, parser):
         if key.startswith("_") or key in {"command", "input", "config"}:
             continue
         # argparse uses None for omitted optional values; boolean flags also use None here.
-        if value is not None:
-            values[key] = value
+        if value is None:
+            continue
+        # An empty value on the command line clears what the configuration file set,
+        # since there is otherwise no way to take a parameter back: --dict-file ''.
+        if value == "" or (isinstance(value, list) and value and not any(value)):
+            values[key] = None
+            continue
+        values[key] = value
     return values
 
 
