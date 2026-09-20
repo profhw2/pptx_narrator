@@ -70,14 +70,14 @@ The pipeline is split into steps so that text can be reviewed before synthesis. 
 pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja \
   --extract --scan --dict-file readings_ja.csv
 
-# 2. Review by hand: ws/slide_N.txt (notes) and readings_ja.csv (readings)
+# 2. Review by hand: ws/slide_N_ja.txt (notes) and readings_ja.csv (readings)
 
 # 3. Synthesize with a cloned voice and verify
 pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --dict-file readings_ja.csv \
   --tts --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt \
   --verify --cer-threshold 0.15
 
-# 4. Listen to the slides flagged in ws/verify_report.qwen3-1.7B.csv, fix the
+# 4. Listen to the slides flagged in ws/verify_report_ja.qwen3-1.7B.csv, fix the
 #    dictionary or notes, re-run step 3 for those slides (--slides 4,7), then pack
 pptx-narrator --pptx lecture.pptx --workspace ws --target-lang ja --engine qwen3 \
   --pack --out lecture_narrated.pptx
@@ -110,13 +110,13 @@ Existing translations are not overwritten; use `--retranslate` after changing th
 
 | File | Content |
 |---|---|
-| `slide_N.txt`, `slide_N_eng.txt`, `slide_N_<lang>.txt` | Note text in Japanese, English, or another language (e.g. `slide_3_de.txt`) |
-| `slide_N<suffix>.<model>.spoken.txt` | Narration text after dictionary replacement, as sent to the TTS engine |
-| `slide_N<suffix>.<model>.m4a` | Generated audio |
-| `verify_report<suffix>.<model>.csv` | Verification report, one row per slide |
-| `verify_differences<suffix>.<model>.csv` | Every place where the narration and the transcript disagree |
+| `slide_N_<lang>.txt` | Note text, in the language named in the file name (`slide_3_ja.txt`, `slide_3_en.txt`, `slide_3_de.txt`) |
+| `slide_N_<lang>.<model>.spoken.txt` | Narration text after dictionary replacement, as sent to the TTS engine |
+| `slide_N_<lang>.<model>.m4a` | Generated audio |
+| `verify_report_<lang>.<model>.csv` | Verification report, one row per slide |
+| `verify_differences_<lang>.<model>.csv` | Every place where the narration and the transcript disagree |
 | `translations.json` | Which version of each source note a translation was made from |
-| `slide_N<suffix>.stale.txt` | Previous narration set aside because the source note changed |
+| `slide_N_<lang>.stale.txt` | Previous narration set aside because the source note changed |
 
 ### Reference voice
 
@@ -157,7 +157,7 @@ Today we talk about genome editing.
 今日はゲノム編集について話します。
 ```
 
-Keep the marker lines when editing such notes in PowerPoint. When `--extract` finds this layout, only the source part is used as the note to translate. The narration part is restored as the existing translation, including edits made in PowerPoint, as long as the source part is unchanged (the hash identifies the translated version). If the source part was edited, the old narration is set aside as `slide_N<suffix>.stale.txt` and `--translate` produces a new translation. Spoken-form narration (`spoken` in the marker) is never restored.
+Keep the marker lines when editing such notes in PowerPoint. When `--extract` finds this layout, only the source part is used as the note to translate. The narration part is restored as the existing translation, including edits made in PowerPoint, as long as the source part is unchanged (the hash identifies the translated version). If the source part was edited, the old narration is set aside as `slide_N_<lang>.stale.txt` and `--translate` produces a new translation. Spoken-form narration (`spoken` in the marker) is never restored.
 
 ## Command-line reference
 
@@ -193,7 +193,7 @@ Run `pptx-narrator --help` for details. Underscore spellings (`--dict_file`, `--
 
 ### Verification report
 
-The step writes two files. `verify_differences<suffix>.<model>.csv` lists every place where the narration and the transcript disagree, longest first: the slide, the length, the position, what the text said, what the ASR heard, and a few characters of context on each side. This is the list to read: it says where to listen, often what happened, and it can be sorted or filtered as you like; `--min-difference` sets how short a difference is still listed (default 4 characters). `verify_report<suffix>.<model>.csv` summarizes the same comparison per slide, worst first, and marks a slide `FLAGGED` when its similarity falls below `--verify-threshold` or when one stretch of disagreement is longer than `--max-difference` characters (default 40): the first catches a small error in a short note, the second a dropped phrase in a note of any length. Neither is a pass/fail test; many low-scoring slides sound natural and only reflect recognition errors. The report lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), `differences` and `longest_difference` (how many places differ and how long the longest stretch is, which is what distinguishes a skipped phrase from scattered recognition differences), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
+The step writes two files. `verify_differences_<lang>.<model>.csv` lists every place where the narration and the transcript disagree, longest first: the slide, the length, the position, what the text said, what the ASR heard, and a few characters of context on each side. This is the list to read: it says where to listen, often what happened, and it can be sorted or filtered as you like; `--min-difference` sets how short a difference is still listed (default 4 characters). `verify_report_<lang>.<model>.csv` summarizes the same comparison per slide, worst first, and marks a slide `FLAGGED` when its similarity falls below `--verify-threshold` or when one stretch of disagreement is longer than `--max-difference` characters (default 40): the first catches a small error in a short note, the second a dropped phrase in a note of any length. Neither is a pass/fail test; many low-scoring slides sound natural and only reflect recognition errors. The report lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), `differences` and `longest_difference` (how many places differ and how long the longest stretch is, which is what distinguishes a skipped phrase from scattered recognition differences), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
 
 ## Limitations
 

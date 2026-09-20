@@ -23,5 +23,6 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - In a dictionary, a `;` at the start of a line or after a space starts a comment that runs to the end of the line, for annotating an entry or switching it off; a line that is only a comment is skipped. Terms containing `#` or `;` are unaffected.
 - `--scan-compounds` writes the compounds of Japanese notes, with the reading a Japanese front end assembles for them, as comment lines in the dictionary; they do nothing until the reading is corrected and the `;` removed.
 - `--scan` no longer proposes single letters or digits, which have no useful reading of their own.
+- Workspace files always name the language of their text (`slide_3_ja.txt`, `slide_3_en.txt`, `slide_3_de.txt`, and likewise for the spoken text, the audio and the reports), instead of leaving Japanese unmarked and writing English as `_eng`. Files written by pre-release versions are still recognized when a workspace is read.
 - Typographic apostrophes, primes, quotation marks and dashes in the notes (e.g. the ’ PowerPoint inserts, or ′ pasted from a paper) match a dictionary entry written with the plain ASCII character, so an entry such as `5',ごだっしゅ` applies to all of its shapes.
 - Dictionary entries containing a backslash are reported, because they are matched literally and usually come from shell escaping.

@@ -32,9 +32,9 @@ d = tempfile.mkdtemp()
 # ---------------------------------------------------------------- languages
 ok(pn.normalize_lang("ZH_cn") == "zh-CN" and pn.normalize_lang("zh") == "zh-CN" and pn.normalize_lang("eng") == "en"
    and pn.normalize_lang("he") == "iw" and pn.normalize_lang("Auto") == "auto", "normalize_lang")
-ok(pn.text_filename(3, "ja") == "slide_3.txt" and pn.text_filename(3, "en") == "slide_3_eng.txt" and pn.text_filename(3, "de") == "slide_3_de.txt",
+ok(pn.text_filename(3, "ja") == "slide_3_ja.txt" and pn.text_filename(3, "en") == "slide_3_en.txt" and pn.text_filename(3, "de") == "slide_3_de.txt",
    "text filenames (v1.x names kept for ja/en)")
-ok(pn.audio_filename(1, "ja", "v4") == "slide_1.v4.m4a" and pn.spoken_filename(1, "en", "v4") == "slide_1_eng.v4.spoken.txt",
+ok(pn.audio_filename(1, "ja", "v4") == "slide_1_ja.v4.m4a" and pn.spoken_filename(1, "en", "v4") == "slide_1_en.v4.spoken.txt",
    "audio/spoken filenames")
 ok(pn.qwen3_language("de") == "German" and pn.qwen3_language("zh-TW") == "Chinese" and pn.qwen3_language("nl") is None, "Qwen3 languages")
 ok(pn.gpt_sovits_language("yue") == "yue" and pn.gpt_sovits_language("de") is None, "GPT-SoVITS languages")
@@ -83,7 +83,7 @@ for t in ["今日はDNAの話です。", "Today we talk about DNA and its struct
 deck = os.path.join(d, "deck.pptx"); prs.save(deck)
 ws = os.path.join(d, "ws"); os.makedirs(ws)
 pn.step_extract_notes(deck, ws, [1, 2, 3], "auto")
-ok(sorted(os.listdir(ws)) == ["slide_1.txt", "slide_2_eng.txt", "slide_3_ko.txt"], f"auto extraction {sorted(os.listdir(ws))}")
+ok(sorted(os.listdir(ws)) == ["slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"], f"auto extraction {sorted(os.listdir(ws))}")
 ws2 = os.path.join(d, "ws2"); os.makedirs(ws2)
 pn.step_extract_notes(deck, ws2, [2], "de")
 ok(os.listdir(ws2) == ["slide_2_de.txt"], "explicit --source-lang")
@@ -105,14 +105,14 @@ pn.GoogleTranslator = FakeTr
 pn.step_translate_notes(ws, [1, 2, 3], "auto", "de")
 ok(read(os.path.join(ws, "slide_1_de.txt")).startswith("[ja->de]") and read(os.path.join(ws, "slide_2_de.txt")).startswith("[en->de]")
    and read(os.path.join(ws, "slide_3_de.txt")).startswith("[ko->de]"), "translate ja/en/ko -> de")
-write(os.path.join(ws, "slide_1.txt"), "塩基対の話です。")
+write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話です。")
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T)
 ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")), "existing translation kept without --retranslate")
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T, overwrite=True)
-ok(FakeTr.calls[-1] == "Basenpaareの話です。" and read(os.path.join(ws, "slide_1.txt")) == "塩基対の話です。",
+ok(FakeTr.calls[-1] == "Basenpaareの話です。" and read(os.path.join(ws, "slide_1_ja.txt")) == "塩基対の話です。",
    "--retranslate: dictionary applied to the note sent to the translator; note file unchanged")
 pn.step_translate_notes(ws2, [2], "de", "ja")
-ok(read(os.path.join(ws2, "slide_2.txt")).startswith("[de->ja]"), "translate de -> ja")
+ok(read(os.path.join(ws2, "slide_2_ja.txt")).startswith("[de->ja]"), "translate de -> ja")
 pn.step_translate_notes(ws2, [2], "de", "xx")
 ok(not os.path.exists(os.path.join(ws2, "slide_2_xx.txt")), "unsupported target language handled")
 
@@ -122,8 +122,8 @@ sys.modules["nltk.corpus"] = types.SimpleNamespace(
     stopwords=types.SimpleNamespace(words=lambda *a: ["the", "is", "about", "we", "and", "its", "in"]),
     words=types.SimpleNamespace(words=lambda: ["today", "talk", "structure", "cell", "slide"]))
 ws3 = os.path.join(d, "ws3"); os.makedirs(ws3)
-write(os.path.join(ws3, "slide_1.txt"), "今日はDNAとPCRとGFPの話です。")
-write(os.path.join(ws3, "slide_2.txt"), "CRISPRについて。")
+write(os.path.join(ws3, "slide_1_ja.txt"), "今日はDNAとPCRとGFPの話です。")
+write(os.path.join(ws3, "slide_2_ja.txt"), "CRISPRについて。")
 write(os.path.join(ws3, "slide_2_de.txt"), "Heute zeigen wir, wie CRISPR und mRNA in Zellen wirken, 5 kDa groß.")
 terms_file = os.path.join(d, "new_terms.csv")
 pn.step_scan_and_update_dict(ws3, terms_file, [], [1, 2], "de", for_translation=True)
@@ -336,7 +336,7 @@ ok(pn.text_fingerprint("a\r\nb  \n") == pn.text_fingerprint("a\nb"), "fingerprin
 # extract the packed deck again: source part is extracted, unchanged translation restored
 ws4 = os.path.join(d, "ws4"); os.makedirs(ws4)
 pn.step_extract_notes(out_deck, ws4, [1, 2, 3], "auto")
-ok(read(os.path.join(ws4, "slide_1.txt")) == "塩基対の話です。" and read(os.path.join(ws4, "slide_1_de.txt")).startswith("[ja->de]"),
+ok(read(os.path.join(ws4, "slide_1_ja.txt")) == "塩基対の話です。" and read(os.path.join(ws4, "slide_1_de.txt")).startswith("[ja->de]"),
    "re-extraction: source part + restored translation")
 ok(pn._load_manifest(ws4)["1"]["de"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"), "manifest written on restore")
 FakeTr.calls.clear()
@@ -351,7 +351,7 @@ edited = os.path.join(d, "edited.pptx"); prs_e.save(edited)
 ws5 = os.path.join(d, "ws5"); os.makedirs(ws5)
 write(os.path.join(ws5, "slide_1_de.txt"), "old narration in the workspace")
 pn.step_extract_notes(edited, ws5, [1], "auto")
-ok(read(os.path.join(ws5, "slide_1.txt")) == "塩基対とRNAの話です。" and not os.path.exists(os.path.join(ws5, "slide_1_de.txt"))
+ok(read(os.path.join(ws5, "slide_1_ja.txt")) == "塩基対とRNAの話です。" and not os.path.exists(os.path.join(ws5, "slide_1_de.txt"))
    and read(os.path.join(ws5, "slide_1_de.stale.txt")).startswith("[ja->de]"), "edited source -> stale narration set aside")
 pn.step_translate_notes(ws5, [1], "auto", "de", dictionary=T)
 ok("RNA" in read(os.path.join(ws5, "slide_1_de.txt")), "stale narration is translated again")
@@ -362,11 +362,11 @@ prs_s = Presentation(); s_ = prs_s.slides.add_slide(prs_s.slide_layouts[5]); s_.
 sp = os.path.join(d, "spoken.pptx"); prs_s.save(sp)
 ws6 = os.path.join(d, "ws6"); os.makedirs(ws6)
 pn.step_extract_notes(sp, ws6, [1], "auto")
-ok(sorted(os.listdir(ws6)) == ["slide_1.txt"], "spoken narration block ignored on extraction")
+ok(sorted(os.listdir(ws6)) == ["slide_1_ja.txt"], "spoken narration block ignored on extraction")
 
 # pack warns when the translation is older than the source note
 logs.clear()
-write(os.path.join(ws, "slide_1.txt"), "塩基対の話を変更しました。")
+write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話を変更しました。")
 pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4", source_lang="auto", writeback_notes=True)
 note_old = pn.parse_structured_note(Presentation(os.path.join(d, "out2.pptx")).slides[0].notes_slide.notes_text_frame.text)
 ok(any("older version of the source note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),

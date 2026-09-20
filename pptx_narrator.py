@@ -64,8 +64,10 @@ MODELS_CONFIG = {
 # ==========================================
 # Configuration & Constants
 # ==========================================
-# Workspace file names: Japanese keeps the v1.0 names (slide_N.txt), English keeps
-# slide_N_eng.txt, and every other language uses slide_N_<lang>.txt.
+# Workspace file names carry the language of the text: slide_N_<lang>.txt, with <lang>
+# the Google Translate code (slide_3_ja.txt, slide_3_en.txt, slide_3_zh-CN.txt). Files
+# written by pre-release versions (slide_N.txt for Japanese, slide_N_eng.txt for English)
+# are still recognized when a workspace is read.
 CJK_LANGS = {"ja", "zh", "yue", "ko"}
 
 # Languages accepted by the TTS engines (ISO 639-1 base code -> value passed to the engine)
@@ -102,11 +104,6 @@ def base_lang(code):
 
 
 def lang_suffix(lang):
-    base = base_lang(lang)
-    if base == "ja":
-        return ""
-    if base == "en":
-        return "_eng"
     return f"_{lang}"
 
 
@@ -1724,7 +1721,7 @@ PPTX-Narrator: automated narration of PowerPoint presenter notes
 -----------------------------------------------------------------
 [Narration in the language of the notes]
  1. pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja --extract --scan --dict-file readings_ja.csv
- 2. Review ws/slide_N.txt and readings_ja.csv by hand
+ 2. Review ws/slide_N_<lang>.txt and readings_ja.csv by hand
  3. pptx-narrator --pptx deck.pptx --workspace ws --target-lang ja --dict-file readings_ja.csv \\
       --tts --verify --pack --out narrated.pptx --ref-wav ref.wav --ref-text-file ref.txt
 [Translated narration] translation and synthesis are separate runs with their own dictionaries:
