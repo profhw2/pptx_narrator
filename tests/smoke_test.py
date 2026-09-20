@@ -385,6 +385,11 @@ ok(any("older version of the source note" in m for m in logs) and note_old["fing
    "stale translation flagged at pack time and marked by its original fingerprint")
 
 # ---------------------------------------------------------------- command line
+# The CLI writes .pptx_narrator_state.json and .pptx_narrator_resolved.toml into the
+# working directory, and "no previous input" only holds where no state exists yet, so
+# this section runs in a directory of its own.
+deck = os.path.abspath(deck)
+cli_cwd = os.path.join(d, "cli"); os.makedirs(cli_cwd); os.chdir(cli_cwd)
 parser = pn.build_parser()
 a = parser.parse_args(["translate", "ws", "--in_lang", "JA", "--out-lang", "zh_cn",
                        "--dict-file", "a.csv", "--dict_file", "b.csv"])
