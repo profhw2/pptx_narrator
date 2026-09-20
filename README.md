@@ -197,9 +197,9 @@ section applies to every command, and a section named after a command applies to
 [common]
 in_lang = "ja"
 workspace = "ws"
+engine = "qwen3"          # synthesize, verify and pack all need it
 
 [synthesize]
-engine = "qwen3"
 ref_wav = "my_voice.wav"
 ref_text_file = "my_voice.txt"
 dict_file = "readings_ja.csv"
@@ -207,6 +207,11 @@ dict_file = "readings_ja.csv"
 [verify]
 cer_threshold = 0.15
 ```
+
+`engine` (and `qwen3-model-size`, if it is not the default) belongs in `[common]`, because the generated file names
+carry the engine and model: `synthesize` writes `slide_3_ja.qwen3-1.7B.m4a`, and `verify` and `pack` look for that same
+name. Setting the engine under `[synthesize]` alone leaves the other two looking for `v2ProPlus` files and finding
+nothing.
 
 With that file, step 3 of the quick start is `pptx-narrator synthesize ws` and `pptx-narrator verify ws`.
 

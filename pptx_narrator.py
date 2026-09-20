@@ -1272,7 +1272,16 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
                     f"{n_runs} difference(s), longest {worst_run} characters [{status}]")
 
     if not results:
-        logger.info("No slides with both audio and spoken-text files found -- nothing to verify.")
+        # The file names carry the engine and model, so looking for the wrong label is
+        # the usual reason nothing is found. Say which labels the workspace does hold.
+        present = sorted({m.group(1) for m in
+                          (re.match(r"^slide_\d+(?:_[^.]+)?\.(.+)\.m4a$", n)
+                           for n in os.listdir(workspace_dir)) if m})
+        logger.info(f"No slides with both audio and spoken text for '{model_label}' in {lang} "
+                    "-- nothing to verify.")
+        if present:
+            logger.info("The workspace holds audio for: " + ", ".join(present)
+                        + ". Give the engine that produced it, e.g. --engine qwen3.")
         return
 
     report_p = os.path.join(workspace_dir, f"verify_report{lang_suffix(lang)}.{model_label}.csv")
@@ -2066,7 +2075,7 @@ def build_parser(config_values=None):
     )
     _add_common_options(parser, config_values or {})
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # ---- extract ---------------------------------------------------------
     p = sub.add_parser("extract", help="Extract presenter notes from a PPTX")
@@ -2257,6 +2266,11 @@ def main(argv=None):
         raise SystemExit(str(e))
 
     parser = build_parser(config)
+    # Nothing runs without a command, but say what the commands are instead of
+    # only complaining that one is missing.
+    if not boot.command:
+        parser.print_help()
+        raise SystemExit(1)
     args = parser.parse_args(argv)
     command = args.command
     effective = _merge_effective(command, args, config, parser)
