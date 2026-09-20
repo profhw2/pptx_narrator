@@ -33,7 +33,7 @@ d = tempfile.mkdtemp()
 ok(pn.normalize_lang("ZH_cn") == "zh-CN" and pn.normalize_lang("zh") == "zh-CN" and pn.normalize_lang("eng") == "en"
    and pn.normalize_lang("he") == "iw" and pn.normalize_lang("Auto") == "auto", "normalize_lang")
 ok(pn.text_filename(3, "ja") == "slide_3_ja.txt" and pn.text_filename(3, "en") == "slide_3_en.txt" and pn.text_filename(3, "de") == "slide_3_de.txt",
-   "text filenames (v1.x names kept for ja/en)")
+   "text file names carry the language")
 ok(pn.audio_filename(1, "ja", "v4") == "slide_1_ja.v4.m4a" and pn.spoken_filename(1, "en", "v4") == "slide_1_en.v4.spoken.txt",
    "audio/spoken filenames")
 ok(pn.qwen3_language("de") == "German" and pn.qwen3_language("zh-TW") == "Chinese" and pn.qwen3_language("nl") is None, "Qwen3 languages")
