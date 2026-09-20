@@ -974,6 +974,22 @@ def split_into_chunks(text):
     parts = re.split(r'(?<=[。！？])|(?<=[.!?])\s+', text)
     return [p.strip() for p in parts if p and p.strip()]
 
+# Qwen3-TTS 12Hz models emit 12 codec frames per second of audio, so a cap on the
+# number of new tokens is a cap on the duration.
+QWEN3_CODEC_HZ = 12
+RUNAWAY_FACTOR = 3.0
+
+
+def chunk_token_budget(chunk_text, chars_per_sec, hz=QWEN3_CODEC_HZ, factor=RUNAWAY_FACTOR):
+    """Most codec tokens a chunk of text can plausibly need, with room to spare.
+
+    The same margin the anomaly check uses, so a generation is cut off only where it
+    would have been rejected anyway.
+    """
+    expected_sec = max(len(chunk_text) / chars_per_sec, 1.0)
+    return int(round(max(expected_sec * factor, 20.0) * hz)) + hz
+
+
 _qwen3_model_cache = {}
 
 def resolve_torch_device(device):
@@ -1092,12 +1108,16 @@ def step_generate_audio_qwen3(
             sr = None
 
             def _gen_chunk(chunk_text):
+                # Stop the model at a length the text cannot justify instead of letting a
+                # runaway generation finish and then discarding it: the codec runs at a
+                # fixed frame rate, so the budget follows from the expected duration.
+                kw = {"max_new_tokens": chunk_token_budget(chunk_text, chars_per_sec)}
                 if voice_clone_prompt is not None:
                     return model.generate_voice_clone(
-                        text=chunk_text, language=language, voice_clone_prompt=voice_clone_prompt,
+                        text=chunk_text, language=language, voice_clone_prompt=voice_clone_prompt, **kw
                     )
                 return model.generate_voice_clone(
-                    text=chunk_text, language=language, ref_audio=ref_wav, ref_text=ref_txt,
+                    text=chunk_text, language=language, ref_audio=ref_wav, ref_text=ref_txt, **kw
                 )
 
             def _is_anomalous(chunk_text, wav, sample_rate):

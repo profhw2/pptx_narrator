@@ -177,10 +177,15 @@ class FakeModel:
         return "P"
     def generate_voice_clone(self, text, language, **kw):
         seen.setdefault("languages", set()).add(language)
+        seen["max_new_tokens"] = kw.get("max_new_tokens")
         return [np.zeros(2400, dtype="float32")], 24000
 pn._load_qwen3_model = lambda size, device: FakeModel()
 pn.step_generate_audio_qwen3(ws, [1, 2], "de", "r.wav", reftxt, R_de, "qwen3-1.7B", "1.7B", "auto")
 ok(seen.get("languages") == {"German"} and os.path.exists(os.path.join(ws, "slide_1_de.qwen3-1.7B.m4a")), "Qwen3 German synthesis")
+ok(seen.get("max_new_tokens") is not None
+   and pn.chunk_token_budget("a" * 140, 14.0) < pn.chunk_token_budget("a" * 700, 14.0)
+   and pn.chunk_token_budget("", 14.0) >= 20 * pn.QWEN3_CODEC_HZ,
+   "generation is capped at a length the text can justify")
 
 # ---------------------------------------------------------------- verification (ASR mocked)
 fw = types.ModuleType("faster_whisper")
