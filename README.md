@@ -168,7 +168,8 @@ pptx-narrator COMMAND [INPUT] [OPTIONS]
 
 `COMMAND` is one of `extract`, `scan`, `translate`, `synthesize`, `verify`, `pack`; nothing runs unless a command
 says so. `INPUT` is a file or a directory: a directory is processed as a whole, a file on its own, so one slide is
-redone by naming its file (`pptx-narrator synthesize ws/slide_4_ja.txt`). If `INPUT` is omitted, the input recorded
+redone by naming its file (`pptx-narrator synthesize ws/slide_4_ja.txt`). `extract` and `pack` take the deck;
+`scan`, `translate`, `synthesize` and `verify` take the workspace or one of its files, and refuse a deck. If `INPUT` is omitted, the input recorded
 by the previous run of that command is reused, but only after its SHA-256 still matches; a changed input has to be
 named again.
 

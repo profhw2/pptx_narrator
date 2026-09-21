@@ -489,6 +489,14 @@ expect_error(["pack", deck, "--workspace", wse, "--in-lang", "ja", "--engine", "
 
 expect_error(["scan", os.path.join(cli_cwd, "no_such_ws"), "--in-lang", "ja",
               "--dict-file", "d.csv"], "workspace does not exist")
+expect_error(["verify", deck, "--workspace", wse, "--in-lang", "ja"],
+             "must be a workspace directory or one of its files")
+expect_error(["verify", os.path.join(wse, "slide_1_ja.txt"), "--workspace", cli_cwd,
+              "--in-lang", "ja"], "is not in --workspace")
+ok(pn._is_workspace_file("slide_4_ja.txt")
+   and pn._is_workspace_file("slide_4_ja.qwen3-1.7B.m4a")
+   and not pn._is_workspace_file("lecture.pptx"),
+   "a deck is not a workspace file")
 
 ok(not hasattr(parser.parse_args(["pack", deck]), "use_spoken_notes")
    and "--use-spoken-notes" not in open(os.path.join(os.path.dirname(__file__), "..", "README.md"),

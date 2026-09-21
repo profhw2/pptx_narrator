@@ -1873,6 +1873,12 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _is_workspace_file(name):
+    """Whether a file name is one a workspace command can be pointed at."""
+    return bool(_TEXT_FILE_RE.match(name)
+                or re.match(r"^slide_\d+_[^.]+\.(.+)\.(m4a|spoken\.txt)$", name))
+
+
 def _file_role(name):
     """What a workspace file is, for the record of a directory input."""
     if name.endswith(".spoken.txt"):
@@ -2423,6 +2429,17 @@ def main(argv=None):
             if os.path.isdir(input_path):
                 workspace_dir = input_path
             elif os.path.isfile(input_path):
+                # A single file names one slide of a workspace. Anything else -- a deck,
+                # most obviously -- would silently become a workspace of its own and find
+                # nothing, so it is refused here rather than reported as missing audio.
+                if not _is_workspace_file(os.path.basename(input_path)):
+                    parser.error(f"{command} INPUT must be a workspace directory or one of its files "
+                                 f"(slide_N_<lang>.txt or slide_N_<lang>.<model>.m4a), not "
+                                 f"{os.path.basename(input_path)}")
+                owner = os.path.abspath(os.path.dirname(input_path) or ".")
+                if workspace_hint and os.path.abspath(workspace_hint) != owner:
+                    parser.error(f"INPUT {input_path} is not in --workspace {workspace_hint}; "
+                                 "name the file inside that workspace, or drop --workspace")
                 original_file_input = input_path
                 file_workspace_tmp = _prepare_file_workspace(command, input_path, effective.get("in_lang"))
                 workspace_dir = file_workspace_tmp
