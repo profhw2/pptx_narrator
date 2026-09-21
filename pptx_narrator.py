@@ -822,6 +822,34 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
     return written
 
+# Google Translate accepts about five requests per second. The notes are translated
+# line by line, which is well within that for one deck, but a long deck run back to
+# back with another can cross it, so the requests are spaced and a refusal is waited out.
+TRANSLATE_MIN_INTERVAL = 0.25
+TRANSLATE_RETRIES = 4
+_last_translate_call = [0.0]
+
+
+def _translate_line(translator, text, attempts=TRANSLATE_RETRIES):
+    """One translation request, spaced out and retried when the service refuses."""
+    delay = 1.0
+    for attempt in range(1, attempts + 1):
+        wait = TRANSLATE_MIN_INTERVAL - (time.monotonic() - _last_translate_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            _last_translate_call[0] = time.monotonic()
+            return translator.translate(text) or ""
+        except Exception as e:
+            if attempt == attempts or "too many requests" not in str(e).lower():
+                raise
+            logger.warning(f"Translation rate limit reached; waiting {delay:.0f}s "
+                           f"(attempt {attempt} of {attempts - 1})")
+            time.sleep(delay)
+            delay *= 2
+    return ""
+
+
 def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang,
                          dictionary=None, overwrite=False):
     logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' ---")
@@ -859,7 +887,7 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
             if dictionary:
                 line_in = apply_dictionary(line_in, dictionary, src_lang, builtin_units=False)
             try:
-                translated_lines.append(translator.translate(line_in) or "")
+                translated_lines.append(_translate_line(translator, line_in))
             except Exception as e:
                 logger.error(f"Slide {slide_num} translation error: {e}")
                 translated_lines.append("")
@@ -1322,7 +1350,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     logger.info(f"Done: {n_flagged}/{len(results)} slide(s) flagged for review ({criterion}).")
     if n_latin:
         logger.info(f"{n_latin} slide(s) contain un-converted Latin-script words and need a listen.")
-    logger.info(f"Report saved to: {report_p} (sorted worst-first)")
+    logger.info(f"Report saved to: {os.path.basename(report_p)} (sorted worst-first)")
 
     if differences:
         diff_p = os.path.join(workspace_dir, f"verify_differences{lang_suffix(lang)}.{model_label}.csv")
@@ -1331,7 +1359,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
             w.writerow(["slide", "length", "position", "intended", "recognized", "before", "after"])
             for row in sorted(differences, key=lambda r: (-r[1], r[0], r[2])):
                 w.writerow(row)
-        logger.info(f"{len(differences)} difference(s) of at least {min_difference} characters listed in: {diff_p} "
+        logger.info(f"{len(differences)} difference(s) of at least {min_difference} characters listed in: "
+                    f"{os.path.basename(diff_p)} "
                     "(longest first)")
 
 _P14_MEDIA_RE = re.compile(r'<(p14:media)\b([^>]*?)(/?)>(?:(.*?)</p14:media>)?', re.DOTALL)
@@ -1873,6 +1902,42 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _suggest_command(command, input_path, workspace_hint, in_lang=None):
+    """The command the user most likely meant, when the one given cannot work.
+
+    Everything needed is already known -- which command was asked for, what was
+    handed to it, and which workspace is in play -- so the correction is worked
+    out rather than guessed at.
+    """
+    def _lang():
+        return f" --in-lang {in_lang}" if in_lang else " --in-lang <lang>"
+
+    if command in {"scan", "translate", "synthesize", "verify"}:
+        if input_path and input_path.lower().endswith(".pptx"):
+            # A deck was handed to a workspace command.
+            if workspace_hint:
+                return f"pptx-narrator {command} {workspace_hint}{_lang()}"
+            guess = os.path.join(os.path.dirname(input_path) or ".",
+                                 "workspace_" + os.path.splitext(os.path.basename(input_path))[0])
+            if os.path.isdir(guess):
+                return f"pptx-narrator {command} {os.path.relpath(guess)}{_lang()}"
+            return (f"pptx-narrator extract {input_path} --workspace ws  # first, then\n"
+                    f"  pptx-narrator {command} ws{_lang()}")
+        if not input_path and not workspace_hint:
+            return f"pptx-narrator {command} <workspace>{_lang()}"
+    if command in {"extract", "pack"} and input_path and os.path.isdir(input_path):
+        # A workspace was handed to a command that takes the deck.
+        decks = sorted(n for n in os.listdir(os.path.dirname(input_path) or ".")
+                       if n.lower().endswith(".pptx"))
+        deck = decks[0] if len(decks) == 1 else "<deck>.pptx"
+        return f"pptx-narrator {command} {deck} --workspace {input_path}"
+    return None
+
+
+def _did_you_mean(suggestion):
+    return f"\n\nDid you mean:\n  {suggestion}" if suggestion else ""
+
+
 def _is_workspace_file(name):
     """Whether a file name is one a workspace command can be pointed at."""
     return bool(_TEXT_FILE_RE.match(name)
@@ -1946,16 +2011,24 @@ def _snapshot_matches(saved, current):
     return old == new
 
 
-def _resolve_input(command, explicit_input, state):
-    """Resolve explicit input or a verified last input for this command."""
+def _resolve_input(command, explicit_input, state, workspace_dir=None):
+    """Resolve explicit input or a verified last input for this command.
+
+    A recorded input inside the workspace is stored relative to it, so it is
+    resolved against the workspace rather than against the current directory.
+    """
     if explicit_input:
         snap = _input_snapshot(explicit_input, command)
         return snap["path"], snap
     saved = state.get("commands", {}).get(command, {}).get("input")
     if not saved:
         raise RuntimeError(f"no previous input is recorded for '{command}'; specify INPUT explicitly")
-    current = _input_snapshot(saved["path"], command)
-    if not _snapshot_matches(saved, current):
+    saved_path = saved["path"]
+    if not os.path.isabs(saved_path) and workspace_dir:
+        saved_path = os.path.normpath(os.path.join(workspace_dir, saved_path))
+    current = _input_snapshot(saved_path, command)
+    if not _snapshot_matches(_relativize_snapshot(saved, workspace_dir),
+                             _relativize_snapshot(current, workspace_dir)):
         raise RuntimeError(
             f"the previously used input for '{command}' has changed; specify INPUT explicitly"
         )
@@ -2050,6 +2123,36 @@ def _save_resolved_config(resolved, path=RESOLVED_CONFIG_FILE):
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Resolved PPTX-Narrator configuration; all values are effective values.\n")
         _write_toml_table(f, resolved)
+
+
+def _rel_to_workspace(path, workspace_dir):
+    """A path inside the workspace, written relative to it.
+
+    A workspace is moved and copied often, so what it records about its own
+    contents must not depend on where it happens to sit. Anything outside it
+    keeps its absolute path, because nothing else identifies it.
+    """
+    if not path or not workspace_dir:
+        return path
+    abs_path = os.path.abspath(path)
+    abs_ws = os.path.abspath(workspace_dir)
+    if abs_path == abs_ws:
+        return "."
+    if abs_path.startswith(abs_ws + os.sep):
+        return os.path.relpath(abs_path, abs_ws)
+    return abs_path
+
+
+def _relativize_snapshot(snapshot, workspace_dir):
+    """Rewrite the paths of an input record relative to the workspace."""
+    if not snapshot:
+        return snapshot
+    out = dict(snapshot)
+    out["path"] = _rel_to_workspace(out.get("path"), workspace_dir)
+    if out.get("files"):
+        out["files"] = [dict(f, path=_rel_to_workspace(f.get("path"), workspace_dir))
+                        for f in out["files"]]
+    return out
 
 
 def _workspace_path(workspace_dir, filename):
@@ -2367,10 +2470,13 @@ def main(argv=None):
         os.makedirs(workspace_hint, exist_ok=True)
     elif command != "extract":
         if not workspace_hint:
-            parser.error(f"{command} requires --workspace (or a workspace directory as INPUT)")
+            parser.error(f"{command} requires --workspace (or a workspace directory as INPUT)"
+                         + _did_you_mean(_suggest_command(command, args.input, None,
+                                                          effective.get("in_lang"))))
         workspace_hint = os.path.abspath(workspace_hint)
         if not os.path.isdir(workspace_hint):
-            parser.error(f"workspace does not exist: {workspace_hint}; run extract first or correct --workspace")
+            parser.error(f"workspace does not exist: {workspace_hint}\n\nCheck the path, or create it first:\n"
+                         f"  pptx-narrator extract <deck>.pptx --workspace {workspace_hint}")
 
     state = _load_state(_workspace_path(workspace_hint, STATE_FILE)) if workspace_hint else _load_state()
     effective = _inherit_synthesis_settings(command, effective, args, config, state)
@@ -2388,7 +2494,7 @@ def main(argv=None):
         # Workspace commands need no redundant positional INPUT; the workspace
         # itself is their explicit data source.
         explicit_input = args.input or (workspace_hint if command in {"scan", "translate", "synthesize", "verify"} else None)
-        input_path, input_snapshot = _resolve_input(command, explicit_input, state)
+        input_path, input_snapshot = _resolve_input(command, explicit_input, state, workspace_hint)
         _validate_input_language(input_path, command, effective.get("in_lang"))
     except RuntimeError as e:
         parser.error(str(e))
@@ -2435,7 +2541,9 @@ def main(argv=None):
                 if not _is_workspace_file(os.path.basename(input_path)):
                     parser.error(f"{command} INPUT must be a workspace directory or one of its files "
                                  f"(slide_N_<lang>.txt or slide_N_<lang>.<model>.m4a), not "
-                                 f"{os.path.basename(input_path)}")
+                                 f"{os.path.basename(input_path)}"
+                                 + _did_you_mean(_suggest_command(command, input_path, workspace_hint,
+                                                                  effective.get("in_lang"))))
                 owner = os.path.abspath(os.path.dirname(input_path) or ".")
                 if workspace_hint and os.path.abspath(workspace_hint) != owner:
                     parser.error(f"INPUT {input_path} is not in --workspace {workspace_hint}; "
@@ -2558,6 +2666,7 @@ def main(argv=None):
         input_snapshot = _input_snapshot(input_path, command)
     except RuntimeError:
         pass
+    input_snapshot = _relativize_snapshot(input_snapshot, workspace_dir)
     extra = {}
     if workspace_dir:
         extra["workspace"] = workspace_dir
@@ -2584,26 +2693,30 @@ def main(argv=None):
     state_dir = workspace_hint or workspace_dir
     _save_state(state, _workspace_path(state_dir, STATE_FILE))
 
+    # Everything inside the workspace is recorded relative to it, so that the
+    # workspace can be moved or copied without invalidating its own record.
+    rel_snapshot = _relativize_snapshot(input_snapshot, state_dir)
     metadata = {
         "software_version": __version__,
         "generated_at": state["commands"][command]["generated_at"],
         "command": command,
-        "config_file": config_path or "",
-        "input_path": input_snapshot.get("path", ""),
-        "input_kind": input_snapshot.get("kind", ""),
+        "workspace": os.path.abspath(state_dir) if state_dir else "",
+        "paths_relative_to": "workspace",
+        "config_file": _rel_to_workspace(config_path, state_dir) if config_path else "",
+        "input_path": rel_snapshot.get("path", ""),
+        "input_kind": rel_snapshot.get("kind", ""),
     }
-    if input_snapshot.get("kind") == "file":
-        metadata["input_sha256"] = input_snapshot.get("sha256", "")
+    if rel_snapshot.get("kind") == "file":
+        metadata["input_sha256"] = rel_snapshot.get("sha256", "")
     else:
-        metadata["input_files_json"] = json.dumps(input_snapshot.get("files", []), ensure_ascii=False, sort_keys=True)
+        metadata["input_files_json"] = json.dumps(rel_snapshot.get("files", []), ensure_ascii=False, sort_keys=True)
     resolved = {"metadata": metadata, command: effective}
     _save_resolved_config(resolved, _workspace_path(state_dir, RESOLVED_CONFIG_FILE))
     _append_history(state_dir, {
         "command": command,
         "generated_at": metadata["generated_at"],
-        "input": input_snapshot,
+        "input": rel_snapshot,
         "effective": effective,
-        "workspace": state_dir,
         "status": "success",
     })
 

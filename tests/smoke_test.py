@@ -503,4 +503,18 @@ ok(not hasattr(parser.parse_args(["pack", deck]), "use_spoken_notes")
                                         encoding="utf-8").read(),
    "the spoken text is never written into the notes")
 
+ok(pn._rel_to_workspace("/w/ws/slide_1_ja.txt", "/w/ws") == "slide_1_ja.txt"
+   and pn._rel_to_workspace("/w/ws", "/w/ws") == "."
+   and pn._rel_to_workspace("/elsewhere/deck.pptx", "/w/ws") == "/elsewhere/deck.pptx",
+   "a path inside the workspace is recorded relative to it")
+snap = {"kind": "directory", "path": "/w/ws",
+        "files": [{"path": "/w/ws/slide_1_ja.txt", "sha256": "x"}]}
+ok(pn._relativize_snapshot(snap, "/w/ws")["files"][0]["path"] == "slide_1_ja.txt",
+   "the files of a directory record are relative too")
+
+ok(pn._suggest_command("verify", "lecture.pptx", "ws", "ja") == "pptx-narrator verify ws --in-lang ja",
+   "a deck given to a workspace command suggests the workspace")
+ok("extract" in (pn._suggest_command("verify", os.path.join(cli_cwd, "nowhere.pptx"), None, "ja") or ""),
+   "with no workspace in sight, extract is suggested first")
+
 print("ALL TESTS PASSED")
