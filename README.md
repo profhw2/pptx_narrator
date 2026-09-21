@@ -148,7 +148,7 @@ A four-column dictionary (`Term,Japanese_Reading,English_Reading,Type`) from an 
 
 Data recorded together with the old audio is also removed from a narrated slide, because its timing belongs to that audio: the laser-pointer path (`p14:laserTraceLst`) and the recorded play/pause/seek events (`p14:showEvtLst`). `--remove-recorded pointer|events|none` narrows or disables this (default: `all`). Ink annotations are kept and reported. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
 
-With `--writeback-notes`, the narration is written into the notes. When it differs from the original note (translated narration, or the rewritten text with `--use-spoken-notes`), the note keeps both parts:
+With `--writeback-notes`, the human-editable narration text is written into the notes. When it differs from the original note (for example, translated narration), the note keeps both parts:
 
 ```
 === pptx-narrator: narration [en] from [ja] #ae82d4f1fc ===
@@ -178,11 +178,11 @@ reads, `--out-lang` the language of the data it writes. Each command accepts onl
 | Command | INPUT | Options |
 |---|---|---|
 | `extract` | PPTX | `--in-lang` (languages to extract, e.g. `ja` or `ja,en`; omitted = every language found), `--workspace`, `--slides` |
-| `scan` | text file or workspace | `--in-lang`, `--dict-file`, `--scan-compounds`, `--workspace` |
-| `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate` |
-| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}`, `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}`, `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio` |
-| `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off) |
-| `pack` | PPTX | `--workspace`, `--out` (default `output.pptx`), `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--slides`, `--writeback-notes`, `--use-spoken-notes`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`) |
+| `scan` | text file or workspace | `--in-lang`, `--dict-file`, `--scan-compounds`, `--slides`, `--workspace` |
+| `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate`, `--workspace` |
+| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`, `--workspace` |
+| `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off), `--workspace` |
+| `pack` | PPTX | `--workspace`, `--out` (default `output.pptx`), `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--slides`, `--writeback-notes`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`) |
 
 `--config FILE` and `--version` are accepted before the command. Run `pptx-narrator COMMAND --help` for the full
 list. Underscore spellings (`--dict_file`, `--in_lang`, …) are also accepted.

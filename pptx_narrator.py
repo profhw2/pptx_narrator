@@ -1369,11 +1369,12 @@ RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "even
 
 
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
-                   source_lang="auto", writeback_notes=False, use_spoken_notes=False,
+                   source_lang="auto", writeback_notes=False,
                    remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
     prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
+    notes_written = 0
     for i, slide in enumerate(prs.slides):
         s_num = i + 1
         if s_num not in requested_slides:
@@ -1382,8 +1383,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
         if writeback_notes:
             src_lang, src_p = find_source_text(workspace_dir, s_num, source_lang, exclude_lang=lang)
             text_p = os.path.join(workspace_dir, text_filename(s_num, lang))
-            spoken_p = os.path.join(workspace_dir, spoken_filename(s_num, lang, model_label))
-            narration = _read_text(spoken_p if use_spoken_notes else text_p)
+            narration = _read_text(text_p)
             if src_p is not None:
                 original, original_lang = _read_text(src_p), src_lang
             else:
@@ -1400,7 +1400,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
                         logger.warning(f"Slide #{s_num}: the {lang} narration was translated from an older version "
                                        f"of the source note (run --translate --retranslate to update it).")
                 note_text = compose_structured_note(lang, narration, original_lang, original,
-                                                    fingerprint=fingerprint, spoken=use_spoken_notes)
+                                                    fingerprint=fingerprint)
             else:
                 note_text = narration or original
 
@@ -1408,6 +1408,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             notes_slide = slide.notes_slide
             if notes_slide.notes_text_frame is not None:
                 notes_slide.notes_text_frame.text = note_text
+                notes_written += 1
             else:
                 logger.warning(f"Slide #{s_num}: No text frame in notes slide (skipped)")
 
@@ -1418,6 +1419,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             z.extractall(tmpdir)
         slide_w, slide_h = _slide_size(tmpdir)
         slide_parts = _slide_part_paths(tmpdir)
+        embedded = 0
         for s_num in requested_slides:
             m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
             if os.path.exists(m4a_p) and s_num <= len(slide_parts):
@@ -1425,12 +1427,15 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
                                       slide_w, slide_h, slide_part=slide_parts[s_num - 1],
                                       remove_recorded=remove_recorded, icon_outside=icon_outside,
                                       pause_ms=pause_ms)
+                embedded += 1
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
         os.replace(archive_path, output_pptx)
     os.remove(tmp_pptx)
+    logger.info(f"Packed {embedded} slide(s); wrote back notes on {notes_written} slide(s).")
     logger.info(f"Final output saved to: {output_pptx}")
+    return embedded, notes_written
 
 
 # ------------------------------------------
@@ -2041,6 +2046,18 @@ def _save_resolved_config(resolved, path=RESOLVED_CONFIG_FILE):
         _write_toml_table(f, resolved)
 
 
+def _workspace_path(workspace_dir, filename):
+    """Return the path of workspace-owned execution metadata."""
+    return os.path.join(workspace_dir, filename)
+
+
+def _append_history(workspace_dir, entry):
+    """Append a compact, machine-readable record of one completed command."""
+    path = _workspace_path(workspace_dir, ".pptx_narrator_history.jsonl")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def _config_for_command(config, command):
     common = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
     section = config.get(command, {}) if isinstance(config.get(command, {}), dict) else {}
@@ -2114,6 +2131,8 @@ def build_parser(config_values=None):
          help="Dictionary CSV to update; repeatable")
     _add(p, "--scan-compounds", dest="scan_compounds", action="store_true", default=None,
          help="With Japanese input, propose Japanese compounds in the dictionary")
+    _add(p, "--slides", dest="slides", default=None,
+         help="Slide range, e.g. 1-5 or 1,3,5- (default: all matching slides)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Optional workspace associated with the input (normally not needed)")
 
@@ -2125,6 +2144,8 @@ def build_parser(config_values=None):
          help="Dictionary CSV(s) applied before translation")
     _add(p, "--retranslate", dest="retranslate", action="store_true", default=None,
          help="Overwrite existing translations")
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Workspace containing input/output text")
 
     p = sub.add_parser("synthesize", help="Generate voice-cloned narration")
     p.add_argument("input", nargs="?", help="Input text file or directory")
@@ -2145,6 +2166,8 @@ def build_parser(config_values=None):
     _add(p, "--enable-drc", dest="enable_drc", action="store_true", default=None)
     _add(p, "--drc-threshold", dest="drc_threshold", type=float, default=None)
     _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None)
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Workspace containing input text and generated audio")
 
     p = sub.add_parser("verify", help="Verify generated narration with ASR")
     p.add_argument("input", nargs="?", help="Input audio/text directory or file")
@@ -2159,6 +2182,8 @@ def build_parser(config_values=None):
     _add(p, "--min-difference", dest="min_difference", type=int, default=None)
     _add(p, "--max-difference", dest="max_difference", type=int, default=None)
     _add(p, "--cer-threshold", dest="cer_threshold", type=float, default=None)
+    _add(p, "--workspace", dest="workspace", default=None,
+         help="Workspace containing audio and spoken-text sidecars")
 
     # ---- pack ------------------------------------------------------------
     p = sub.add_parser("pack", help="Embed generated narration into a PPTX")
@@ -2172,7 +2197,6 @@ def build_parser(config_values=None):
     _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
     _add(p, "--slides", dest="slides", default=None, help="Slide range")
     _add(p, "--writeback-notes", dest="writeback_notes", action="store_true", default=None)
-    _add(p, "--use-spoken-notes", dest="use_spoken_notes", action="store_true", default=None)
     _add(p, "--slide-pause", dest="slide_pause", type=float, default=None)
     _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None)
     _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"], default=None)
@@ -2189,23 +2213,23 @@ def build_parser(config_values=None):
 def _defaults():
     return {
         "extract": {"workspace": None, "slides": None},
-        "scan": {"scan_compounds": False},
+        "scan": {"scan_compounds": False, "slides": None},
         "translate": {"retranslate": False, "dict_file": None},
         "synthesize": {
-            "engine": "gpt_sovits", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/",
+            "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/",
             "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
             "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
             "letter_map": None,
         },
         "verify": {
-            "model": "v2ProPlus", "engine": "gpt_sovits", "qwen3_model_size": "1.7B",
+            "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
             "asr_model": "small", "asr_device": "cpu", "verify_threshold": 0.85,
             "min_difference": 4, "max_difference": 40, "cer_threshold": None,
         },
         "pack": {
-            "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "gpt_sovits",
+            "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "qwen3",
             "qwen3_model_size": "1.7B", "slides": None, "writeback_notes": False,
-            "use_spoken_notes": False, "slide_pause": 1.0, "keep_audio_icon": False,
+            "slide_pause": 1.0, "keep_audio_icon": False,
             "remove_recorded": "all",
         },
     }
@@ -2228,6 +2252,36 @@ def _merge_effective(command, args, config, parser):
             continue
         values[key] = value
     return values
+
+
+def _inherit_synthesis_settings(command, values, args, config, state):
+    """Use the last successful synthesis in this workspace when not overridden.
+
+    CLI and TOML values remain authoritative.  This prevents a Qwen3 synthesis
+    followed by a bare ``pack`` from silently looking for GPT-SoVITS filenames.
+    """
+    if command not in {"verify", "pack"}:
+        return values
+    prior = state.get("commands", {}).get("synthesize", {}).get("resolved_config", {})
+    if not prior:
+        return values
+    configured = _config_for_command(config, command)
+    for key in ("in_lang", "engine", "model", "qwen3_model_size"):
+        if getattr(args, key, None) is None and key not in configured and prior.get(key) is not None:
+            values[key] = prior[key]
+    return values
+
+
+def _audio_model_labels(workspace_dir, lang):
+    """Return model labels of audio files available for one narration language."""
+    pattern = re.compile(r"^slide_\d+_" + re.escape(lang) + r"\.(.+)\.m4a$")
+    return sorted({m.group(1) for name in os.listdir(workspace_dir)
+                   if (m := pattern.match(name))})
+
+
+def _text_slides(workspace_dir, lang):
+    return [slide for slide in sorted(_slides_from_workspace(workspace_dir))
+            if os.path.exists(os.path.join(workspace_dir, text_filename(slide, lang)))]
 
 
 def _validate_and_normalize(command, v, parser):
@@ -2294,11 +2348,41 @@ def main(argv=None):
     args = parser.parse_args(argv)
     command = args.command
     effective = _merge_effective(command, args, config, parser)
-    effective = _validate_and_normalize(command, effective, parser)
 
-    state = _load_state()
+    # Execution state belongs to the workspace, never to whatever directory
+    # happened to be current when a command was run.  A directory INPUT remains
+    # accepted as a backwards-compatible spelling of --workspace.
+    workspace_hint = effective.get("workspace")
+    if not workspace_hint and command in {"scan", "translate", "synthesize", "verify"} and args.input:
+        if os.path.isdir(args.input) or not os.path.isfile(args.input):
+            workspace_hint = args.input
+    if command == "extract" and workspace_hint:
+        workspace_hint = os.path.abspath(workspace_hint)
+        os.makedirs(workspace_hint, exist_ok=True)
+    elif command != "extract":
+        if not workspace_hint:
+            parser.error(f"{command} requires --workspace (or a workspace directory as INPUT)")
+        workspace_hint = os.path.abspath(workspace_hint)
+        if not os.path.isdir(workspace_hint):
+            parser.error(f"workspace does not exist: {workspace_hint}; run extract first or correct --workspace")
+
+    state = _load_state(_workspace_path(workspace_hint, STATE_FILE)) if workspace_hint else _load_state()
+    effective = _inherit_synthesis_settings(command, effective, args, config, state)
+    effective = _validate_and_normalize(command, effective, parser)
+    if command in {"verify", "pack"}:
+        configured = _config_for_command(config, command)
+        model_is_explicit = any(getattr(args, key, None) is not None
+                                for key in ("engine", "model", "qwen3_model_size"))
+        model_is_configured = any(key in configured for key in ("engine", "model", "qwen3_model_size"))
+        labels = _audio_model_labels(workspace_hint, effective["in_lang"])
+        if not model_is_explicit and not model_is_configured and len(labels) > 1:
+            parser.error("multiple audio model labels are present in this workspace: "
+                         + ", ".join(labels) + ". Specify --engine (and model size if applicable).")
     try:
-        input_path, input_snapshot = _resolve_input(command, args.input, state)
+        # Workspace commands need no redundant positional INPUT; the workspace
+        # itself is their explicit data source.
+        explicit_input = args.input or (workspace_hint if command in {"scan", "translate", "synthesize", "verify"} else None)
+        input_path, input_snapshot = _resolve_input(command, explicit_input, state)
         _validate_input_language(input_path, command, effective.get("in_lang"))
     except RuntimeError as e:
         parser.error(str(e))
@@ -2361,6 +2445,7 @@ def main(argv=None):
 
     if command == "extract":
         effective["workspace"] = workspace_dir
+    logger.info(f"Workspace: {os.path.abspath(workspace_dir)}")
     if command in {"scan", "translate", "synthesize", "verify", "pack"}:
         # For directories, the command's INPUT is the processing workspace; for pack it is the PPTX.
         pass
@@ -2368,8 +2453,15 @@ def main(argv=None):
     # The remaining command implementations operate on the existing workspace-based functions.
     if command == "scan":
         dictionaries = load_dictionaries(effective["dict_file"], effective["in_lang"])
+        available_slides = _text_slides(workspace_dir, effective["in_lang"])
+        if not available_slides:
+            parser.error(f"no {effective['in_lang']} slide text was found in workspace: {workspace_dir}")
+        selected = sorted(parse_slide_ranges(effective.get("slides"), max(available_slides)))
+        slides = [n for n in selected if n in set(available_slides)]
+        if not slides:
+            parser.error(f"no workspace slide matches --slides {effective.get('slides')!r}")
         step_scan_and_update_dict(workspace_dir, effective["dict_file"][0], dictionaries,
-                                  sorted(_slides_from_workspace(workspace_dir)), effective["in_lang"],
+                                  slides, effective["in_lang"],
                                   source_lang=effective["in_lang"], for_translation=False,
                                   propose_compounds=effective["scan_compounds"])
     elif command == "translate":
@@ -2380,7 +2472,9 @@ def main(argv=None):
             parser.error(f"no {effective['in_lang']} text was found in "
                          f"{os.path.basename(original_file_input or input_path)}")
     elif command == "synthesize":
-        slides = sorted(_slides_from_workspace(workspace_dir))
+        slides = _text_slides(workspace_dir, effective["in_lang"])
+        if not slides:
+            parser.error(f"no {effective['in_lang']} text was found in workspace: {workspace_dir}")
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         letter_map_data = load_letter_map(effective.get("letter_map"))
         if effective["engine"] == "gpt_sovits":
@@ -2406,8 +2500,13 @@ def main(argv=None):
                                 drc_threshold=effective["drc_threshold"], drc_ratio=effective["drc_ratio"],
                                 letter_map=letter_map_data)
     elif command == "verify":
-        slides = sorted(_slides_from_workspace(workspace_dir))
         model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        slides = [slide for slide in _text_slides(workspace_dir, effective["in_lang"])
+                  if os.path.exists(os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label)))]
+        if not slides:
+            available = _audio_model_labels(workspace_dir, effective["in_lang"])
+            parser.error(f"verify found no {effective['in_lang']} audio for model '{model_label}'. "
+                         + (f"Available model labels: {', '.join(available)}." if available else ""))
         step_verify_audio(workspace_dir, slides, effective["in_lang"], model_label,
                           effective["asr_model"], effective["asr_device"], effective["verify_threshold"],
                           effective["cer_threshold"], max_difference=effective["max_difference"] or None,
@@ -2416,11 +2515,17 @@ def main(argv=None):
         prs = Presentation(input_path)
         slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
         model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        audio_paths = [os.path.join(workspace_dir, audio_filename(s, effective["in_lang"], model_label))
+                       for s in slides]
+        if not any(os.path.exists(p) for p in audio_paths):
+            available = _audio_model_labels(workspace_dir, effective["in_lang"])
+            suffix = f" Available model labels: {', '.join(available)}." if available else " No matching audio files exist."
+            parser.error(f"pack found no {effective['in_lang']} audio for model '{model_label}'."
+                         f" Expected {os.path.basename(audio_paths[0]) if audio_paths else 'slide_N_<lang>.<model>.m4a'}.{suffix}")
         output = os.path.abspath(effective["out"])
         # pack uses the narration language as its input-data language.
         step_pack_pptx(input_path, output, workspace_dir, slides, effective["in_lang"], model_label,
                        source_lang="auto", writeback_notes=effective["writeback_notes"],
-                       use_spoken_notes=effective["use_spoken_notes"],
                        remove_recorded=RECORDED_CHOICES[effective["remove_recorded"]],
                        icon_outside=not effective["keep_audio_icon"],
                        pause_ms=int(round(effective["slide_pause"] * 1000)))
@@ -2450,7 +2555,17 @@ def main(argv=None):
     state["commands"][command]["resolved_config"] = effective
     state["commands"][command]["software_version"] = __version__
     state["commands"][command]["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    _save_state(state)
+    if command == "synthesize":
+        model_label = (effective["model"] if effective["engine"] == "gpt_sovits"
+                       else f"qwen3-{effective['qwen3_model_size']}")
+        state["commands"][command]["audio_files"] = [
+            os.path.basename(path) for path in sorted(
+                os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label))
+                for slide in _slides_from_workspace(workspace_dir)
+            ) if os.path.exists(path)
+        ]
+    state_dir = workspace_hint or workspace_dir
+    _save_state(state, _workspace_path(state_dir, STATE_FILE))
 
     metadata = {
         "software_version": __version__,
@@ -2465,7 +2580,15 @@ def main(argv=None):
     else:
         metadata["input_files_json"] = json.dumps(input_snapshot.get("files", []), ensure_ascii=False, sort_keys=True)
     resolved = {"metadata": metadata, command: effective}
-    _save_resolved_config(resolved)
+    _save_resolved_config(resolved, _workspace_path(state_dir, RESOLVED_CONFIG_FILE))
+    _append_history(state_dir, {
+        "command": command,
+        "generated_at": metadata["generated_at"],
+        "input": input_snapshot,
+        "effective": effective,
+        "workspace": state_dir,
+        "status": "success",
+    })
 
 
 def _prepare_file_workspace(command, input_path, in_lang=None):

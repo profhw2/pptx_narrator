@@ -395,6 +395,10 @@ ok(any("older version of the source note" in m for m in logs) and note_old["fing
 # this section runs in a directory of its own.
 deck = os.path.abspath(deck)
 cli_cwd = os.path.join(d, "cli"); os.makedirs(cli_cwd); os.chdir(cli_cwd)
+# A workspace must exist, and hold text, for the commands that read one.
+os.makedirs(os.path.join(cli_cwd, "ws"))
+for _lang in ("ja", "de", "nl"):
+    write(os.path.join(cli_cwd, "ws", f"slide_1_{_lang}.txt"), "text")
 parser = pn.build_parser()
 a = parser.parse_args(["translate", "ws", "--in_lang", "JA", "--out-lang", "zh_cn",
                        "--dict-file", "a.csv", "--dict_file", "b.csv"])
@@ -419,12 +423,13 @@ def expect_error(argv, text):
 
 expect_error(["synthesize", "ws", "--in-lang", "nl", "--engine", "qwen3",
               "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
-expect_error(["synthesize", "ws", "--in-lang", "de",
+expect_error(["synthesize", "ws", "--in-lang", "de", "--engine", "gpt_sovits",
               "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support")
 expect_error(["translate", "ws", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
 expect_error(["scan", "ws"], "--in-lang")
 expect_error(["extract", deck, "--in-lang", "fr"], "no note in fr")
-expect_error(["scan", "--in-lang", "ja", "--dict-file", "d.csv"], "no previous input")
+expect_error(["scan", "--in-lang", "ja", "--dict-file", "d.csv"],
+             "requires --workspace")
 
 # built-in defaults -> configuration file -> command line
 args = parser.parse_args(["pack", deck])
@@ -450,4 +455,44 @@ ok(pn._normalize_config_keys({"a-b": {"c-d": 1}}) == {"a_b": {"c_d": 1}},
    "hyphenated keys in the configuration file are accepted")
 ok(parser.parse_args(["scan", "ws", "--config", "x.toml"]).config == "x.toml",
    "--config may follow the command")
+# ---------------------------------------------- workspace state and inheritance
+wsi = os.path.join(cli_cwd, "wsi"); os.makedirs(wsi)
+write(os.path.join(wsi, "slide_1_ja.txt"), "\u30c6\u30b9\u30c8")
+AudioSegment.silent(duration=300).export(os.path.join(wsi, "slide_1_ja.qwen3-1.7B.m4a"), format="ipod")
+write(os.path.join(wsi, "slide_1_ja.qwen3-1.7B.spoken.txt"), "\u30c6\u30b9\u30c8")
+pn._save_state({"version": 1, "commands": {"synthesize": {
+    "resolved_config": {"in_lang": "ja", "engine": "qwen3", "qwen3_model_size": "1.7B",
+                        "model": "qwen3-1.7B"}}}}, pn._workspace_path(wsi, pn.STATE_FILE))
+st = pn._load_state(pn._workspace_path(wsi, pn.STATE_FILE))
+for cmd in ("verify", "pack"):
+    a = parser.parse_args([cmd, deck, "--workspace", wsi] if cmd == "pack" else [cmd, wsi])
+    eff = pn._inherit_synthesis_settings(cmd, pn._merge_effective(cmd, a, {}, parser), a, {}, st)
+    ok(eff["engine"] == "qwen3" and eff["qwen3_model_size"] == "1.7B",
+       f"{cmd} inherits the engine of the last synthesis in this workspace")
+a = parser.parse_args(["pack", deck, "--workspace", wsi, "--engine", "gpt_sovits"])
+eff = pn._inherit_synthesis_settings("pack", pn._merge_effective("pack", a, {}, parser), a, {}, st)
+ok(eff["engine"] == "gpt_sovits", "an explicit engine still wins over the workspace state")
+
+ok(os.path.exists(pn._workspace_path(wsi, pn.STATE_FILE))
+   and not os.path.exists(os.path.join(cli_cwd, pn.STATE_FILE)),
+   "execution state lives in the workspace, not in the current directory")
+
+AudioSegment.silent(duration=300).export(os.path.join(wsi, "slide_1_ja.v2ProPlus.m4a"), format="ipod")
+ok(pn._audio_model_labels(wsi, "ja") == ["qwen3-1.7B", "v2ProPlus"],
+   "the audio of a workspace is reported by model label")
+expect_error(["pack", deck, "--workspace", wsi], "multiple audio model labels")
+
+wse = os.path.join(cli_cwd, "wse"); os.makedirs(wse)
+write(os.path.join(wse, "slide_1_ja.txt"), "\u30c6\u30b9\u30c8")
+expect_error(["pack", deck, "--workspace", wse, "--in-lang", "ja", "--engine", "qwen3"],
+             "found no ja audio")
+
+expect_error(["scan", os.path.join(cli_cwd, "no_such_ws"), "--in-lang", "ja",
+              "--dict-file", "d.csv"], "workspace does not exist")
+
+ok(not hasattr(parser.parse_args(["pack", deck]), "use_spoken_notes")
+   and "--use-spoken-notes" not in open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
+                                        encoding="utf-8").read(),
+   "the spoken text is never written into the notes")
+
 print("ALL TESTS PASSED")
