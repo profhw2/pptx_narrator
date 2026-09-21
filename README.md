@@ -11,7 +11,7 @@
 - **Translation** – notes can be translated into any language supported by Google Translate (via `deep-translator`); a dictionary applied to the notes beforehand fixes how technical terms are translated.
 - **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a dictionary for manual review.
 - **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
-- **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server). Which one sounds closer to the speaker is a matter of judgement and changes with engine versions; in the author's use Qwen3-TTS reproduces Japanese and English closely from a single Japanese reference recording, so it is worth trying first.
+- **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server). Which one sounds closer to the speaker is a matter of judgement and changes with engine versions; in the author's use Qwen3-TTS reproduces Japanese and English closely from a single Japanese reference recording, which is why it is the default. GPT-SoVITS remains selectable and needs its API server running.
 - **ASR screening (auxiliary)** – audio can be transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); per-slide similarity, the longest single stretch of disagreement and the character error rate (CER) flag the slides most likely to be misread.
 - **PPTX repackaging** – the narration audio is embedded in each slide (replacing earlier audio or inserted as a new narration object) and the automatic slide advance time (`advTm`) is set to the audio duration plus a short pause, so the deck plays as a self-running show and can be exported as a video. Translated narration can be written into the notes above the original note, in a marked layout that later extractions recognize.
 
@@ -42,11 +42,14 @@ Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN
 ```bash
 git clone https://github.com/profhw2/pptx_narrator.git
 cd pptx_narrator
-pip install -e .            # core pipeline (GPT-SoVITS engine, translation)
-pip install -e ".[qwen3]"   # + Qwen3-TTS engine
-pip install -e ".[verify]"  # + ASR verification
-pip install -e ".[all]"     # everything
+pip install -e ".[qwen3]"   # the default engine, Qwen3-TTS
+pip install -e ".[all]"     # + ASR verification (faster-whisper, pyopenjtalk)
 ```
+
+`--engine` defaults to `qwen3`, so the `qwen3` extra is what a normal installation needs; it brings in PyTorch.
+`pip install -e .` alone installs the pipeline without a local TTS engine, which is enough for `extract`, `scan`,
+`translate` and `pack`, and for `synthesize --engine gpt_sovits` against a GPT-SoVITS API server running separately.
+`pip install -e ".[verify]"` adds the ASR check on its own.
 
 This installs the `pptx-narrator` command. Running `python pptx_narrator.py ...` without installing also works (`pip install -r requirements.txt`).
 The `scan` command downloads the NLTK `stopwords` and `words` corpora on first use; if that fails behind a proxy, run `python -m nltk.downloader stopwords words`.
