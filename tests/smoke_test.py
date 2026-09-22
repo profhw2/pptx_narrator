@@ -528,4 +528,38 @@ ok(pn._select_slides([1, 2, 3, 7], "2,7", parser) == [2, 7]
 expect_error(["synthesize", wse, "--in-lang", "ja", "--slides", "99",
               "--ref-wav", "a", "--ref-text-file", "b"], "no slide of this workspace matches")
 
+def run_cli(argv):
+    """Run the CLI and return (stdout, exit status)."""
+    out = io.StringIO()
+    status = 0
+    try:
+        with contextlib.redirect_stdout(out):
+            pn.main(argv)
+    except SystemExit as e:
+        status = e.code if isinstance(e.code, int) else 1
+    return out.getvalue(), status
+
+top, status = run_cli(["--help"])
+ok(status == 0 and top.count("extract") == 1,
+   "--help lists every command once and is not an error")
+ok(run_cli(["--version"])[0].strip().endswith(pn.__version__)
+   and run_cli(["--version"])[1] == 0,
+   "--version prints the version instead of the help")
+ok(run_cli([])[1] != 0, "no command at all is still an error")
+ok("COMMAND --help" in top, "the help says how to see the options of a command")
+
+sub_help = run_cli(["verify", "--help"])[0]
+ok("--in_lang" not in sub_help and "--in-lang" in sub_help,
+   "an option is listed once, under its hyphenated spelling")
+ok(parser.parse_args(["verify", "ws", "--in_lang", "ja"]).in_lang == "ja",
+   "the underscore spelling still works although it is not listed")
+undocumented = []
+for act in parser._actions:
+    if isinstance(act, argparse._SubParsersAction):
+        for name, sp in act.choices.items():
+            ok(bool(sp.description), f"{name} describes itself in its help")
+            undocumented += [f"{name} {a.option_strings[0]}" for a in sp._actions
+                             if a.option_strings and a.help is None]
+ok(undocumented == [], f"every option has help text (missing: {undocumented})")
+
 print("ALL TESTS PASSED")

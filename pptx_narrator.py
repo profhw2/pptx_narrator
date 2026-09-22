@@ -1807,18 +1807,14 @@ DESCRIPTION = """PPTX-Narrator: automated narration of PowerPoint presenter note
 
 Usage:
   pptx-narrator COMMAND [INPUT] [OPTIONS]
-
-Commands:
-  extract      Extract presenter notes from a PPTX into language-tagged text files.
-  scan         Scan text input for technical terms and update a dictionary.
-  translate   Translate text input from --in-lang to --out-lang.
-  synthesize  Generate voice-cloned narration from text input.
-  verify      ASR round-trip verification of generated narration.
-  pack        Embed generated narration into a PPTX.
+  pptx-narrator COMMAND --help          the options of one command
 
 INPUT may be a file or directory. A directory is processed using the file types
 accepted by the command. If INPUT is omitted, the last explicit input for that
 command is reused only after its identity has been verified with SHA-256.
+
+Options may also be written with underscores (--in_lang) and kept in a TOML
+configuration file; see --config.
 """
 
 
@@ -2176,6 +2172,35 @@ def _config_for_command(config, command):
     return out
 
 
+class HelpFormatter(argparse.RawTextHelpFormatter):
+    """Raw-text help that lists each option once.
+
+    Every option is also accepted with underscores (--in_lang for --in-lang).
+    Printing both spellings would double the width of the option list without
+    telling the reader anything, so only the hyphenated one is shown.
+    """
+
+    def _format_action_invocation(self, action):
+        shown = [name for name in action.option_strings
+                 if "_" not in name or name.replace("_", "-") not in action.option_strings]
+        if not shown or shown == action.option_strings:
+            return super()._format_action_invocation(action)
+        saved = action.option_strings
+        action.option_strings = shown
+        try:
+            return super()._format_action_invocation(action)
+        finally:
+            action.option_strings = saved
+
+    def _format_action(self, action):
+        text = super()._format_action(action)
+        if isinstance(action, argparse._SubParsersAction):
+            # Drop the metavar line argparse prints above the list of commands:
+            # the group is already titled, and the line says nothing.
+            text = text.split("\n", 1)[1]
+        return text
+
+
 def _add(group, *names, **kwargs):
     """Register an option under its hyphenated name plus the underscore spelling.
 
@@ -2217,23 +2242,30 @@ def build_parser(config_values=None):
     parser = argparse.ArgumentParser(
         prog="pptx-narrator",
         description=DESCRIPTION,
-        formatter_class=argparse.RawTextHelpFormatter,
+        formatter_class=HelpFormatter,
     )
     _add_common_options(parser, config_values or {})
 
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", title="Commands")
+    # The commands are what a reader is looking for; show them above the
+    # options that apply to all of them.
+    parser._action_groups.insert(1, parser._action_groups.pop())
 
     # ---- extract ---------------------------------------------------------
-    p = sub.add_parser("extract", help="Extract presenter notes from a PPTX")
+    p = sub.add_parser("extract", help="Extract presenter notes from a PPTX",
+                       description="Extract the presenter notes of a PPTX into one text file per slide,\nnamed after the slide and the language of the note.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Input PPTX file")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None,
-         help="Language(s) of notes to extract, e.g. ja or ja,en; omitted = all recognized languages")
+         help="Language(s) of notes to extract, e.g. ja or ja,en\n(default: every language found in the deck)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Output workspace directory (default: workspace_<filename>)")
-    _add(p, "--slides", dest="slides", default=None, help="Slide range, e.g. 1-5 or 1,3,5- (default: all)")
+    _add(p, "--slides", dest="slides", default=None, help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
 
     # ---- directory/text commands ---------------------------------------
-    p = sub.add_parser("scan", help="Scan text input for technical terms")
+    p = sub.add_parser("scan", help="Scan text input for technical terms",
+                       description="Scan text for technical terms and add them to a dictionary, where their\nreading or translation can be corrected by hand.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Input text file or directory")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
@@ -2241,11 +2273,13 @@ def build_parser(config_values=None):
     _add(p, "--scan-compounds", dest="scan_compounds", action="store_true", default=None,
          help="With Japanese input, propose Japanese compounds in the dictionary")
     _add(p, "--slides", dest="slides", default=None,
-         help="Slide range, e.g. 1-5 or 1,3,5- (default: all matching slides)")
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Optional workspace associated with the input (normally not needed)")
 
-    p = sub.add_parser("translate", help="Translate text input")
+    p = sub.add_parser("translate", help="Translate text input",
+                       description="Translate text from --in-lang into --out-lang, leaving the result as a\ntext file that can be reviewed before it is synthesized.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Input text file or directory")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
     _add(p, "--out-lang", dest="out_lang", type=normalize_lang, default=None, help="Language of the translated output")
@@ -2256,9 +2290,11 @@ def build_parser(config_values=None):
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing input/output text")
     _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
 
-    p = sub.add_parser("synthesize", help="Generate voice-cloned narration")
+    p = sub.add_parser("synthesize", help="Generate voice-cloned narration",
+                       description="Generate narration audio from text, in a voice cloned from a short\nreference recording.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Input text file or directory")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input narration text")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
@@ -2272,50 +2308,73 @@ def build_parser(config_values=None):
          help="Language of reference recording for GPT-SoVITS")
     _add(p, "--api-url", dest="api_url", default=None, help="GPT-SoVITS API server URL")
     _add(p, "--model", default=None, help="GPT-SoVITS model")
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
+         help="Qwen3-TTS model size (default: 1.7B)")
     _add(p, "--qwen3-device", dest="qwen3_device", default=None, help="auto / cuda:0 / mps / cpu")
-    _add(p, "--enable-drc", dest="enable_drc", action="store_true", default=None)
-    _add(p, "--drc-threshold", dest="drc_threshold", type=float, default=None)
-    _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None)
+    _add(p, "--enable-drc", dest="enable_drc", action="store_true", default=None,
+         help="Even out the loudness of the generated audio (default: off)")
+    _add(p, "--drc-threshold", dest="drc_threshold", type=float, default=None,
+         help="Level in dBFS above which --enable-drc compresses (default: -20.0)")
+    _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None,
+         help="Compression ratio used by --enable-drc (default: 3.0)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing input text and generated audio")
     _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
 
-    p = sub.add_parser("verify", help="Verify generated narration with ASR")
+    p = sub.add_parser("verify", help="Verify generated narration with ASR",
+                       description="Transcribe the generated narration and compare it with the text it came\nfrom, to report the slides most likely to be misread.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Input audio/text directory or file")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration")
     _add(p, "--model", default=None, help="TTS model label used in filenames")
     _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
          help="TTS engine, used to derive the model label")
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
-    _add(p, "--asr-model", dest="asr_model", default=None)
-    _add(p, "--asr-device", dest="asr_device", default=None)
-    _add(p, "--verify-threshold", dest="verify_threshold", type=float, default=None)
-    _add(p, "--min-difference", dest="min_difference", type=int, default=None)
-    _add(p, "--max-difference", dest="max_difference", type=int, default=None)
-    _add(p, "--cer-threshold", dest="cer_threshold", type=float, default=None)
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
+         help="Qwen3-TTS model size (default: 1.7B)")
+    _add(p, "--asr-model", dest="asr_model", default=None,
+         help="faster-whisper model used for the check (default: large-v3)")
+    _add(p, "--asr-device", dest="asr_device", default=None,
+         help="auto / cuda / cpu (default: auto)")
+    _add(p, "--verify-threshold", dest="verify_threshold", type=float, default=None,
+         help="Flag a slide whose similarity falls below this (0-1, default: 0.85)")
+    _add(p, "--min-difference", dest="min_difference", type=int, default=None,
+         help="Shortest difference still listed, in characters (default: 4)")
+    _add(p, "--max-difference", dest="max_difference", type=int, default=None,
+         help="Flag a slide with one stretch of disagreement longer than this\n(characters, default: 40; 0 disables)")
+    _add(p, "--cer-threshold", dest="cer_threshold", type=float, default=None,
+         help="Also flag a slide whose character error rate exceeds this\n(default: off)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing audio and spoken-text sidecars")
 
-    # ---- pack ------------------------------------------------------------
     _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
 
-    p = sub.add_parser("pack", help="Embed generated narration into a PPTX")
+    # ---- pack ------------------------------------------------------------
+    p = sub.add_parser("pack", help="Embed generated narration into a PPTX",
+                       description="Write the generated audio and the slide timings into the deck, which\nthen plays by itself and can be exported as a video.",
+                       formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Original/input PPTX file")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing generated text/audio (required unless recoverable from state)")
     _add(p, "--out", default=None, help="Output PPTX path")
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration data being packed")
     _add(p, "--model", default=None, help="TTS model label used in filenames")
-    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None)
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None)
-    _add(p, "--slides", dest="slides", default=None, help="Slide range")
-    _add(p, "--writeback-notes", dest="writeback_notes", action="store_true", default=None)
-    _add(p, "--slide-pause", dest="slide_pause", type=float, default=None)
-    _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None)
-    _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"], default=None)
+    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
+         help="TTS engine whose audio is packed, used to derive the model label")
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
+         help="Qwen3-TTS model size (default: 1.7B)")
+    _add(p, "--slides", dest="slides", default=None,
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
+    _add(p, "--writeback-notes", dest="writeback_notes", action="store_true", default=None,
+         help="Write the narration text above the original note, between marker\nlines that extract recognizes (default: off)")
+    _add(p, "--slide-pause", dest="slide_pause", type=float, default=None,
+         help="Seconds between the end of the narration and the automatic\nslide advance (default: 1.0)")
+    _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None,
+         help="Leave the audio icon on the slide instead of parking it outside\nthe visible area (default: off)")
+    _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"],
+         default=None,
+         help="Settings of a previous recording to remove: trim/fade/bookmarks,\nlaser-pointer path, playback events (default: all)")
 
 
     # --config is read from anywhere in the command line; accept it after the
@@ -2471,6 +2530,12 @@ def main(argv=None):
     # Nothing runs without a command, but say what the commands are instead of
     # only complaining that one is missing.
     if not boot.command:
+        # -h, --help and --version are answers in themselves; without a command
+        # they were reaching the "no command given" path below and leaving with
+        # a failure status, --version without even printing the version.
+        asked = set(sys.argv[1:] if argv is None else argv) & {"-h", "--help", "--version"}
+        if asked:
+            parser.parse_args(argv)  # argparse prints it and exits 0
         parser.print_help()
         raise SystemExit(1)
     args = parser.parse_args(argv)
