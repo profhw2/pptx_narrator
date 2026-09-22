@@ -2172,25 +2172,41 @@ def _config_for_command(config, command):
     return out
 
 
-class HelpFormatter(argparse.RawTextHelpFormatter):
-    """Raw-text help that lists each option once.
+def _normalize_argv(argv):
+    """Rewrite each --underscore_option token to its --hyphen-option spelling.
 
-    Every option is also accepted with underscores (--in_lang for --in-lang).
-    Printing both spellings would double the width of the option list without
-    telling the reader anything, so only the hyphenated one is shown.
+    Every option used to be registered twice, once per spelling, so that both
+    were accepted; on the command line that put two matching option strings
+    in front of argparse's abbreviation matching, and a short prefix such as
+    --dic became ambiguous between --dict-file and --dict_file -- one option,
+    "ambiguous" only because of how it was registered. Normalizing the argv
+    instead means each option is registered once, and a prefix is ambiguous
+    only when it is genuinely shared by two different options.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    out = []
+    for tok in argv:
+        if tok.startswith("--") and tok != "--":
+            name, eq, value = tok.partition("=")
+            tok = name.replace("_", "-") + eq + value
+        out.append(tok)
+    return out
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    """An ArgumentParser that accepts underscores in place of hyphens.
+
+    Subparsers created with add_subparsers() default to the same class, so
+    this covers every command without repeating the override.
     """
 
-    def _format_action_invocation(self, action):
-        shown = [name for name in action.option_strings
-                 if "_" not in name or name.replace("_", "-") not in action.option_strings]
-        if not shown or shown == action.option_strings:
-            return super()._format_action_invocation(action)
-        saved = action.option_strings
-        action.option_strings = shown
-        try:
-            return super()._format_action_invocation(action)
-        finally:
-            action.option_strings = saved
+    def parse_known_args(self, args=None, namespace=None):
+        return super().parse_known_args(_normalize_argv(args), namespace)
+
+
+class HelpFormatter(argparse.RawTextHelpFormatter):
+    """Raw-text help, without the redundant subparsers metavar line."""
 
     def _format_action(self, action):
         text = super()._format_action(action)
@@ -2202,24 +2218,17 @@ class HelpFormatter(argparse.RawTextHelpFormatter):
 
 
 def _add(group, *names, **kwargs):
-    """Register an option under its hyphenated name plus the underscore spelling.
+    """Register an option (the underscore spelling is accepted via _normalize_argv).
 
     A switch (store_true) also gets a --no-... counterpart, so that a value set to true
     in the configuration file can be taken back on the command line.
     """
-    flags = list(names)
-    for name in names:
-        legacy = name.replace("-", "_").replace("__", "--", 1)
-        if legacy != name and legacy not in flags:
-            flags.append(legacy)
-    group.add_argument(*flags, **kwargs)
+    group.add_argument(*names, **kwargs)
     if kwargs.get("action") == "store_true":
         off = dict(kwargs)
         off["action"] = "store_false"
         off["help"] = argparse.SUPPRESS
-        neg = ["--no-" + names[0][2:]]
-        neg.append(neg[0].replace("-", "_").replace("__", "--", 1))
-        group.add_argument(*dict.fromkeys(neg), **off)
+        group.add_argument("--no-" + names[0][2:], **off)
 
 
 def _add_common_options(parser, config_values):
@@ -2239,7 +2248,7 @@ def _apply_cli_config_defaults(namespace, config_values):
 
 
 def build_parser(config_values=None):
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         prog="pptx-narrator",
         description=DESCRIPTION,
         formatter_class=HelpFormatter,

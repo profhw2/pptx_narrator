@@ -571,4 +571,9 @@ ok(parser.parse_args(["synthesize", "ws", "--ref-w", "a.wav", "--ref-t", "a.txt"
    "an option may be abbreviated as far as it stays unambiguous")
 expect_error(["synthesize", "ws", "--ref-", "a"], "ambiguous option")
 
+ok(parser.parse_args(["synthesize", "ws", "--dic", "x.csv"]).dict_file == ["x.csv"],
+   "an abbreviation is not ambiguous against the option's own underscore spelling")
+ok(parser.parse_args(["synthesize", "ws", "--dict-file=z.csv"]).dict_file == ["z.csv"],
+   "--option=value works together with the underscore spelling")
+
 print("ALL TESTS PASSED")
