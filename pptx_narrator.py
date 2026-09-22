@@ -2303,7 +2303,7 @@ def build_parser(config_values=None):
          help="JSON mapping of letters to readings")
     _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None, help="TTS engine")
     _add(p, "--ref-wav", dest="ref_wav", default=None, help="Reference recording (.wav)")
-    _add(p, "--ref-text-file", dest="ref_text_file", default=None, help="Transcript of --ref-wav")
+    _add(p, "--ref-text", dest="ref_text", default=None, help="Transcript of --ref-wav")
     _add(p, "--ref-lang", dest="ref_lang", type=normalize_lang, default=None,
          help="Language of reference recording for GPT-SoVITS")
     _add(p, "--api-url", dest="api_url", default=None, help="GPT-SoVITS API server URL")
@@ -2495,7 +2495,7 @@ def _validate_and_normalize(command, v, parser):
     if command == "scan" and not v.get("dict_file"):
         parser.error("scan requires --dict-file")
     if command == "synthesize":
-        missing = [flag for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text-file", "ref_text_file")) if not v.get(key)]
+        missing = [flag for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text", "ref_text")) if not v.get(key)]
         if missing:
             parser.error("synthesize requires " + " and ".join(missing))
         if v["engine"] == "qwen3" and qwen3_language(v["in_lang"]) is None:
@@ -2700,13 +2700,13 @@ def main(argv=None):
         model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
         if effective["engine"] == "qwen3":
             step_generate_audio_qwen3(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
-                                      effective["ref_text_file"], dictionaries, model_label,
+                                      effective["ref_text"], dictionaries, model_label,
                                       effective["qwen3_model_size"], effective["qwen3_device"],
                                       enable_drc=effective["enable_drc"], drc_threshold=effective["drc_threshold"],
                                       drc_ratio=effective["drc_ratio"], letter_map=letter_map_data)
         else:
             step_generate_audio(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
-                                effective["ref_text_file"], effective["ref_lang"], effective["api_url"],
+                                effective["ref_text"], effective["ref_lang"], effective["api_url"],
                                 dictionaries, model_label, enable_drc=effective["enable_drc"],
                                 drc_threshold=effective["drc_threshold"], drc_ratio=effective["drc_ratio"],
                                 letter_map=letter_map_data)

@@ -59,7 +59,7 @@ To try the tool without preparing a deck, build the sample deck first; its notes
 python examples/make_sample_deck.py sample_lecture.pptx
 ```
 
-Any few seconds of clear speech with its exact transcript can serve as the reference voice (`--ref-wav` / `--ref-text-file`).
+Any few seconds of clear speech with its exact transcript can serve as the reference voice (`--ref-wav` / `--ref-text`).
 
 The pipeline is split into steps so that text can be reviewed before synthesis. Intermediate files live in a workspace directory. A dictionary (`--dict-file`) is a list of string replacements applied to the text processed in the run: to the notes before translation and to the narration text before synthesis.
 
@@ -74,7 +74,7 @@ pptx-narrator scan ws --in-lang ja --dict-file readings_ja.csv
 
 # 3. Synthesize with a cloned voice, then screen the result
 pptx-narrator synthesize ws --in-lang ja --dict-file readings_ja.csv \
-  --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt
+  --engine qwen3 --ref-wav my_voice.wav --ref-text my_voice.txt
 pptx-narrator verify ws --in-lang ja --engine qwen3 --cer-threshold 0.15
 
 # 4. Listen to the slides flagged in ws/verify_report_ja.qwen3-1.7B.csv, fix the
@@ -99,7 +99,7 @@ pptx-narrator scan ws --in-lang de --dict-file readings_de.csv
 # 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed),
 #    writing the German narration above the original note
 pptx-narrator synthesize ws --in-lang de --dict-file readings_de.csv \
-  --engine qwen3 --ref-wav my_voice.wav --ref-text-file my_voice.txt
+  --engine qwen3 --ref-wav my_voice.wav --ref-text my_voice.txt
 pptx-narrator verify ws --in-lang de --engine qwen3
 pptx-narrator pack lecture.pptx --workspace ws --in-lang de --engine qwen3 \
   --writeback-notes --out lecture_de.pptx
@@ -121,7 +121,7 @@ Existing translations are not overwritten; use `--retranslate` after changing th
 
 ### Reference voice
 
-`--ref-wav` is a short, clean recording (a few seconds to about ten seconds) and `--ref-text-file` contains its exact transcript; this recording alone defines the voice. It is typically the presenter's own voice, but any voice can be used with the speaker's consent, for example a native speaker's voice for a translated version. Keep reference recordings private. For GPT-SoVITS, give the language of the recording with `--ref-lang` (default `ja`).
+`--ref-wav` is a short, clean recording (a few seconds to about ten seconds) and `--ref-text` contains its exact transcript; this recording alone defines the voice. It is typically the presenter's own voice, but any voice can be used with the speaker's consent, for example a native speaker's voice for a translated version. Keep reference recordings private. For GPT-SoVITS, give the language of the recording with `--ref-lang` (default `ja`).
 
 ## Dictionaries
 
@@ -182,12 +182,14 @@ reads, `--out-lang` the language of the data it writes. Each command accepts onl
 | `extract` | PPTX | `--in-lang` (languages to extract, e.g. `ja` or `ja,en`; omitted = every language found), `--workspace`, `--slides` |
 | `scan` | text file or workspace | `--in-lang`, `--dict-file`, `--scan-compounds`, `--slides`, `--workspace` |
 | `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate`, `--slides`, `--workspace` |
-| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`, `--slides`, `--workspace` |
+| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--ref-wav`, `--ref-text`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`, `--slides`, `--workspace` |
 | `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off), `--slides`, `--workspace` |
 | `pack` | PPTX | `--workspace`, `--out` (default `output.pptx`), `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--slides`, `--writeback-notes`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`) |
 
 `--config FILE` and `--version` are accepted before the command. Run `pptx-narrator COMMAND --help` for the full
-list. Underscore spellings (`--dict_file`, `--in_lang`, …) are also accepted.
+list. Underscore spellings (`--dict_file`, `--in_lang`, …) are also accepted, and any option may be typed as short
+as it stays unambiguous (`--work ws` for `--workspace ws`; `--ref-t my_voice.txt` for `--ref-text`, since
+`--ref-wav` and `--ref-lang` also start with `--ref-`).
 
 ## Configuration
 
@@ -203,7 +205,7 @@ engine = "qwen3"          # synthesize, verify and pack all need it
 
 [synthesize]
 ref_wav = "my_voice.wav"
-ref_text_file = "my_voice.txt"
+ref_text = "my_voice.txt"
 dict_file = "readings_ja.csv"
 
 [verify]

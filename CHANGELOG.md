@@ -14,6 +14,8 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - An error that comes of pointing a command at the wrong thing says what was most likely meant, as a command to run.
 - `pptx-narrator --help` lists each command once, says that `pptx-narrator COMMAND --help` gives the options of one command, and shows every option under its hyphenated spelling only, the underscore spelling remaining accepted. Each command describes itself at the head of its own help, and every option has help text.
 - `pptx-narrator --version` prints the version instead of the general help, and leaves with a success status, as does `--help`; running the tool with no command at all remains an error.
+- `--ref-text-file` is renamed `--ref-text`, matching the brevity of `--ref-wav`.
+- Every option may be abbreviated on the command line as far as it stays unambiguous (`--work` for `--workspace`), tested rather than merely relied upon as an argparse default.
 - `--slides` selects which slides a command works on, e.g. `--slides 4` or `--slides 1,3,5-`; it is accepted by every command, so `translate`, `synthesize` and `verify` can be re-run for part of a workspace without naming each file. A selection that matches no slide of the workspace is an error that lists the slides it has.
 - Translation requests are spaced out and retried when the service refuses them for rate, instead of failing the slide.
 - A configured value is taken back for one run by giving the option empty (`--dict-file ''`), and a switch set in the file by its `--no-` form (`--no-writeback-notes`); configuration keys may be written with hyphens or underscores, and `--config` may come before or after the command.

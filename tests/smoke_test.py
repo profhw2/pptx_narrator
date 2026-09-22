@@ -422,9 +422,9 @@ def expect_error(argv, text):
     ok(text in buf.getvalue(), f"CLI error: {text}")
 
 expect_error(["synthesize", "ws", "--in-lang", "nl", "--engine", "qwen3",
-              "--ref-wav", "a", "--ref-text-file", "b"], "Qwen3-TTS does not support 'nl'")
+              "--ref-wav", "a", "--ref-text", "b"], "Qwen3-TTS does not support 'nl'")
 expect_error(["synthesize", "ws", "--in-lang", "de", "--engine", "gpt_sovits",
-              "--ref-wav", "a", "--ref-text-file", "b"], "GPT-SoVITS does not support")
+              "--ref-wav", "a", "--ref-text", "b"], "GPT-SoVITS does not support")
 expect_error(["translate", "ws", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
 expect_error(["scan", "ws"], "--in-lang")
 expect_error(["extract", deck, "--in-lang", "fr"], "no note in fr")
@@ -526,7 +526,7 @@ ok(pn._select_slides([1, 2, 3, 7], "2,7", parser) == [2, 7]
    and pn._select_slides([1, 2, 3], None, parser) == [1, 2, 3],
    "--slides narrows the slides of a workspace")
 expect_error(["synthesize", wse, "--in-lang", "ja", "--slides", "99",
-              "--ref-wav", "a", "--ref-text-file", "b"], "no slide of this workspace matches")
+              "--ref-wav", "a", "--ref-text", "b"], "no slide of this workspace matches")
 
 def run_cli(argv):
     """Run the CLI and return (stdout, exit status)."""
@@ -561,5 +561,14 @@ for act in parser._actions:
             undocumented += [f"{name} {a.option_strings[0]}" for a in sp._actions
                              if a.option_strings and a.help is None]
 ok(undocumented == [], f"every option has help text (missing: {undocumented})")
+
+ok(parser.parse_args(["synthesize", "ws", "--ref-wav", "a.wav", "--ref-text", "a.txt"]).ref_text == "a.txt",
+   "the reference transcript option is --ref-text, matching --ref-wav")
+
+ok(parser.parse_args(["synthesize", "ws", "--ref-w", "a.wav", "--ref-t", "a.txt"]).ref_wav == "a.wav"
+   and parser.parse_args(["synthesize", "ws", "--ref-l", "ja"]).ref_lang == "ja"
+   and parser.parse_args(["pack", deck, "--out", "x.pptx", "--work", "ws"]).workspace == "ws",
+   "an option may be abbreviated as far as it stays unambiguous")
+expect_error(["synthesize", "ws", "--ref-", "a"], "ambiguous option")
 
 print("ALL TESTS PASSED")
