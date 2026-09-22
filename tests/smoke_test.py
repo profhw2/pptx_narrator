@@ -3,7 +3,7 @@
 Run from the repository root:  python tests/smoke_test.py
 Requires: python-pptx, pydub (+ FFmpeg), numpy, soundfile, py3langid.
 """
-import os, sys, types, tempfile, csv, zipfile, re, io, contextlib
+import os, sys, types, tempfile, csv, zipfile, re, io, contextlib, argparse
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import pptx_narrator as pn
 from pptx import Presentation
@@ -516,5 +516,16 @@ ok(pn._suggest_command("verify", "lecture.pptx", "ws", "ja") == "pptx-narrator v
    "a deck given to a workspace command suggests the workspace")
 ok("extract" in (pn._suggest_command("verify", os.path.join(cli_cwd, "nowhere.pptx"), None, "ja") or ""),
    "with no workspace in sight, extract is suggested first")
+
+ok(all("--slides" in [a.option_strings[0] for a in sp._actions if a.option_strings]
+       for name, sp in [(n, sp) for act in parser._actions
+                        if isinstance(act, argparse._SubParsersAction)
+                        for n, sp in act.choices.items()]),
+   "every command can be limited to a slide selection")
+ok(pn._select_slides([1, 2, 3, 7], "2,7", parser) == [2, 7]
+   and pn._select_slides([1, 2, 3], None, parser) == [1, 2, 3],
+   "--slides narrows the slides of a workspace")
+expect_error(["synthesize", wse, "--in-lang", "ja", "--slides", "99",
+              "--ref-wav", "a", "--ref-text-file", "b"], "no slide of this workspace matches")
 
 print("ALL TESTS PASSED")

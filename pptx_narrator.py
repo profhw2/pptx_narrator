@@ -2255,6 +2255,8 @@ def build_parser(config_values=None):
          help="Overwrite existing translations")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing input/output text")
+    _add(p, "--slides", default=None,
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
 
     p = sub.add_parser("synthesize", help="Generate voice-cloned narration")
     p.add_argument("input", nargs="?", help="Input text file or directory")
@@ -2277,6 +2279,8 @@ def build_parser(config_values=None):
     _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None)
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing input text and generated audio")
+    _add(p, "--slides", default=None,
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
 
     p = sub.add_parser("verify", help="Verify generated narration with ASR")
     p.add_argument("input", nargs="?", help="Input audio/text directory or file")
@@ -2295,6 +2299,9 @@ def build_parser(config_values=None):
          help="Workspace containing audio and spoken-text sidecars")
 
     # ---- pack ------------------------------------------------------------
+    _add(p, "--slides", default=None,
+         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide of the workspace)")
+
     p = sub.add_parser("pack", help="Embed generated narration into a PPTX")
     p.add_argument("input", nargs="?", help="Original/input PPTX file")
     _add(p, "--workspace", dest="workspace", default=None,
@@ -2323,9 +2330,9 @@ def _defaults():
     return {
         "extract": {"workspace": None, "slides": None},
         "scan": {"scan_compounds": False, "slides": None},
-        "translate": {"retranslate": False, "dict_file": None},
+        "translate": {"retranslate": False, "dict_file": None, "slides": None},
         "synthesize": {
-            "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/",
+            "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/", "slides": None,
             "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
             "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
             "letter_map": None,
@@ -2333,7 +2340,7 @@ def _defaults():
         "verify": {
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
             "asr_model": "small", "asr_device": "cpu", "verify_threshold": 0.85,
-            "min_difference": 4, "max_difference": 40, "cer_threshold": None,
+            "min_difference": 4, "max_difference": 40, "cer_threshold": None, "slides": None,
         },
         "pack": {
             "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "qwen3",
@@ -2386,6 +2393,18 @@ def _audio_model_labels(workspace_dir, lang):
     pattern = re.compile(r"^slide_\d+_" + re.escape(lang) + r"\.(.+)\.m4a$")
     return sorted({m.group(1) for name in os.listdir(workspace_dir)
                    if (m := pattern.match(name))})
+
+
+def _select_slides(slides, selection, parser):
+    """Narrow the slides of a workspace to a --slides selection."""
+    if not selection:
+        return slides
+    wanted = parse_slide_ranges(selection, max(slides) if slides else 0)
+    chosen = [n for n in slides if n in wanted]
+    if not chosen:
+        parser.error(f"no slide of this workspace matches --slides {selection!r}"
+                     + (f" (it has {', '.join(str(n) for n in slides)})" if slides else ""))
+    return chosen
 
 
 def _text_slides(workspace_dir, lang):
@@ -2590,14 +2609,16 @@ def main(argv=None):
                                   source_lang=effective["in_lang"], for_translation=False,
                                   propose_compounds=effective["scan_compounds"])
     elif command == "translate":
-        slides = sorted(_slides_from_workspace(workspace_dir))
+        slides = _select_slides(sorted(_slides_from_workspace(workspace_dir)),
+                                effective.get("slides"), parser)
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         if not step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
                                     dictionary=dictionaries, overwrite=effective["retranslate"]):
             parser.error(f"no {effective['in_lang']} text was found in "
                          f"{os.path.basename(original_file_input or input_path)}")
     elif command == "synthesize":
-        slides = _text_slides(workspace_dir, effective["in_lang"])
+        slides = _select_slides(_text_slides(workspace_dir, effective["in_lang"]),
+                                effective.get("slides"), parser)
         if not slides:
             parser.error(f"no {effective['in_lang']} text was found in workspace: {workspace_dir}")
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
@@ -2626,8 +2647,10 @@ def main(argv=None):
                                 letter_map=letter_map_data)
     elif command == "verify":
         model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
-        slides = [slide for slide in _text_slides(workspace_dir, effective["in_lang"])
-                  if os.path.exists(os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label)))]
+        slides = _select_slides(
+            [slide for slide in _text_slides(workspace_dir, effective["in_lang"])
+             if os.path.exists(os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label)))],
+            effective.get("slides"), parser)
         if not slides:
             available = _audio_model_labels(workspace_dir, effective["in_lang"])
             parser.error(f"verify found no {effective['in_lang']} audio for model '{model_label}'. "

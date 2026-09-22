@@ -168,7 +168,8 @@ pptx-narrator COMMAND [INPUT] [OPTIONS]
 
 `COMMAND` is one of `extract`, `scan`, `translate`, `synthesize`, `verify`, `pack`; nothing runs unless a command
 says so. `INPUT` is a file or a directory: a directory is processed as a whole, a file on its own, so one slide is
-redone by naming its file (`pptx-narrator synthesize ws/slide_4_ja.txt`). `extract` and `pack` take the deck;
+redone by naming its file (`pptx-narrator synthesize ws/slide_4_ja.txt`), or by selecting it with `--slides`
+(`pptx-narrator synthesize ws --in-lang ja --slides 4,7-9`), which every command accepts. `extract` and `pack` take the deck;
 `scan`, `translate`, `synthesize` and `verify` take the workspace or one of its files, and refuse a deck. If `INPUT` is omitted, the input recorded
 by the previous run of that command is reused, but only after its SHA-256 still matches; a changed input has to be
 named again.
@@ -180,9 +181,9 @@ reads, `--out-lang` the language of the data it writes. Each command accepts onl
 |---|---|---|
 | `extract` | PPTX | `--in-lang` (languages to extract, e.g. `ja` or `ja,en`; omitted = every language found), `--workspace`, `--slides` |
 | `scan` | text file or workspace | `--in-lang`, `--dict-file`, `--scan-compounds`, `--slides`, `--workspace` |
-| `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate`, `--workspace` |
-| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`, `--workspace` |
-| `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off), `--workspace` |
+| `translate` | text file or workspace | `--in-lang`, `--out-lang`, `--dict-file`, `--retranslate`, `--slides`, `--workspace` |
+| `synthesize` | text file or workspace | `--in-lang`, `--dict-file`, `--letter-map`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--ref-wav`, `--ref-text-file`, `--ref-lang`, `--api-url`, `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`, `--slides`, `--workspace` |
+| `verify` | audio/text file or workspace | `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off), `--slides`, `--workspace` |
 | `pack` | PPTX | `--workspace`, `--out` (default `output.pptx`), `--in-lang`, `--engine`, `--model`, `--qwen3-model-size`, `--slides`, `--writeback-notes`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`) |
 
 `--config FILE` and `--version` are accepted before the command. Run `pptx-narrator COMMAND --help` for the full
