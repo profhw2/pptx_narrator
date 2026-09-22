@@ -83,13 +83,15 @@ for t in ["今日はDNAの話です。", "Today we talk about DNA and its struct
 deck = os.path.join(d, "deck.pptx"); prs.save(deck)
 ws = os.path.join(d, "ws"); os.makedirs(ws)
 pn.step_extract_notes(deck, ws, [1, 2, 3], "auto")
-ok(sorted(os.listdir(ws)) == ["slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"], f"auto extraction {sorted(os.listdir(ws))}")
+ok(sorted(os.listdir(ws)) == ["note_sources.json", "slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"],
+   f"auto extraction {sorted(os.listdir(ws))}")
 ws2 = os.path.join(d, "ws2"); os.makedirs(ws2)
 pn.step_extract_notes(deck, ws2, [2], "de")
 ok(os.listdir(ws2) == [], "--in-lang is a selector: a note of another language is left out")
 ws2b = os.path.join(d, "ws2b"); os.makedirs(ws2b)
 pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en")
-ok(os.listdir(ws2b) == ["slide_2_en.txt"], "--in-lang keeps only the notes of that language")
+ok(sorted(os.listdir(ws2b)) == ["note_sources.json", "slide_2_en.txt"],
+   "--in-lang keeps only the notes of that language")
 ok(pn.step_extract_notes(deck, ws2b, [1, 2, 3], "fr") == 0
    and pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en") == 1,
    "extract reports what this run wrote, not what the workspace already held")
@@ -186,6 +188,77 @@ ok(seen.get("max_new_tokens") is not None
    and pn.chunk_token_budget("a" * 140, 14.0) < pn.chunk_token_budget("a" * 700, 14.0)
    and pn.chunk_token_budget("", 14.0) >= 20 * pn.QWEN3_CODEC_HZ,
    "generation is capped at a length the text can justify")
+
+# ---------------------------------------------------------------- audio staleness
+ws7 = os.path.join(d, "ws7"); os.makedirs(ws7)
+write(os.path.join(ws7, "slide_1_de.txt"), "Die Basenpaare.")
+write(os.path.join(ws7, "slide_2_de.txt"), "Die Zellen.")
+pn.step_generate_audio_qwen3(ws7, [1, 2], "de", "r.wav", reftxt, R_de, "qwen3-1.7B", "1.7B", "auto")
+ok(pn._load_audio_manifest(ws7).get("slide_1_de.qwen3-1.7B.m4a", {}).get("text_fingerprint")
+   == pn.text_fingerprint("Die Basenpaare."),
+   "synthesis records the fingerprint of the text an audio file was generated from")
+ok(pn.stale_audio_reasons(ws7, 1, "de", "qwen3-1.7B") == []
+   and pn.stale_audio_reasons(ws7, 2, "de", "qwen3-1.7B") == [], "freshly synthesized audio is not stale")
+write(os.path.join(ws7, "slide_1_de.txt"), "Die Basenpaare und RNA.")
+ok(any("text has changed since this audio was synthesized" in r for r in pn.stale_audio_reasons(ws7, 1, "de", "qwen3-1.7B"))
+   and pn.stale_audio_reasons(ws7, 2, "de", "qwen3-1.7B") == [],
+   "editing the text after synthesis is caught; an untouched slide is not flagged")
+
+prs7 = Presentation(); prs7.slides.add_slide(prs7.slide_layouts[5]); prs7.slides.add_slide(prs7.slide_layouts[5])
+deck7 = os.path.join(d, "deck7.pptx"); prs7.save(deck7)
+logs.clear()
+_, _, stale7 = pn.step_pack_pptx(deck7, os.path.join(d, "out7.pptx"), ws7, [1, 2], "de", "qwen3-1.7B",
+                                 source_lang="auto", writeback_notes=False)
+ok(stale7 == [1] and any("Slide #1: the de text has changed since this audio was synthesized" in m for m in logs)
+   and not any("Slide #2:" in m and "changed" in m for m in logs),
+   "pack warns about stale audio and returns which slides, even without --writeback-notes")
+
+ws8 = os.path.join(d, "ws8"); os.makedirs(ws8)
+write(os.path.join(ws8, "slide_1_de.txt"), "Eins.")
+write(os.path.join(ws8, "slide_2_de.txt"), "Zwei.")
+pn.record_audio_source(ws8, "slide_1_de.qwen3-1.7B.m4a", "Eins.")
+tmp8 = pn._prepare_file_workspace("synthesize", os.path.join(ws8, "slide_2_de.txt"))
+pn.record_audio_source(tmp8, "slide_2_de.qwen3-1.7B.m4a", "Zwei.")
+pn._sync_file_workspace(tmp8, os.path.join(ws8, "slide_2_de.txt"), "slide_2_de.txt")
+merged8 = pn._load_audio_manifest(ws8)
+ok("slide_1_de.qwen3-1.7B.m4a" in merged8 and "slide_2_de.qwen3-1.7B.m4a" in merged8,
+   "synthesizing one file of a workspace does not erase another slide's recorded audio fingerprint")
+
+# ---------------------------------------------------------------- extraction staleness
+prs9 = Presentation()
+s9a = prs9.slides.add_slide(prs9.slide_layouts[5]); s9a.notes_slide.notes_text_frame.text = "今日はDNAの話です。"
+s9b = prs9.slides.add_slide(prs9.slide_layouts[5]); s9b.notes_slide.notes_text_frame.text = "今日はRNAの話です。"
+deck9 = os.path.join(d, "deck9.pptx"); prs9.save(deck9)
+ws9 = os.path.join(d, "ws9"); os.makedirs(ws9)
+pn.step_extract_notes(deck9, ws9, [1, 2], "auto")
+prs9r = Presentation(deck9)
+ok(pn.stale_extraction_reason(ws9, prs9r.slides[0], 1, "ja") is None
+   and pn.stale_extraction_reason(ws9, prs9r.slides[1], 2, "ja") is None,
+   "freshly extracted notes are not stale")
+
+# hand-editing the workspace copy -- the documented, expected workflow -- is not
+# mistaken for the deck itself having moved on
+write(os.path.join(ws9, "slide_1_ja.txt"), "今日はDNAの構造の話です。")
+ok(pn.stale_extraction_reason(ws9, prs9r.slides[0], 1, "ja") is None,
+   "editing the workspace copy by hand is not flagged: the deck note itself is unchanged")
+
+# editing the note directly in PowerPoint, without re-extracting, is what the check is for
+prs9e = Presentation(deck9)
+prs9e.slides[1].notes_slide.notes_text_frame.text = "今日はmRNAワクチンの話です。"
+edited9 = os.path.join(d, "edited9.pptx"); prs9e.save(edited9)
+prs9er = Presentation(edited9)
+ok(pn.stale_extraction_reason(ws9, prs9er.slides[0], 1, "ja") is None,
+   "the untouched slide of the edited deck is still not flagged")
+reason9 = pn.stale_extraction_reason(ws9, prs9er.slides[1], 2, "ja")
+ok(reason9 is not None and "changed since it was last extracted" in reason9,
+   "editing the deck's own note without re-extracting is caught")
+
+logs.clear()
+AudioSegment.silent(duration=500).export(os.path.join(ws9, "slide_2_ja.qwen3-1.7B.m4a"), format="ipod")
+_, _, stale9 = pn.step_pack_pptx(edited9, os.path.join(d, "out9.pptx"), ws9, [1, 2], "ja", "qwen3-1.7B",
+                                 source_lang="auto", writeback_notes=False)
+ok(2 in stale9 and any("Slide #2: the deck's own ja note has changed since it was last extracted" in m for m in logs),
+   "pack itself warns when the deck's note has moved on since extraction")
 
 # ---------------------------------------------------------------- verification (ASR mocked)
 fw = types.ModuleType("faster_whisper")
@@ -379,14 +452,14 @@ prs_s = Presentation(); s_ = prs_s.slides.add_slide(prs_s.slide_layouts[5]); s_.
 sp = os.path.join(d, "spoken.pptx"); prs_s.save(sp)
 ws6 = os.path.join(d, "ws6"); os.makedirs(ws6)
 pn.step_extract_notes(sp, ws6, [1], "auto")
-ok(sorted(os.listdir(ws6)) == ["slide_1_ja.txt"], "spoken narration block ignored on extraction")
+ok(sorted(os.listdir(ws6)) == ["note_sources.json", "slide_1_ja.txt"], "spoken narration block ignored on extraction")
 
 # pack warns when the translation is older than the source note
 logs.clear()
 write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話を変更しました。")
 pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4", source_lang="auto", writeback_notes=True)
 note_old = pn.parse_structured_note(Presentation(os.path.join(d, "out2.pptx")).slides[0].notes_slide.notes_text_frame.text)
-ok(any("older version of the source note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),
+ok(any("older version of the ja note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),
    "stale translation flagged at pack time and marked by its original fingerprint")
 
 # ---------------------------------------------------------------- command line
