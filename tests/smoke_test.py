@@ -83,15 +83,13 @@ for t in ["今日はDNAの話です。", "Today we talk about DNA and its struct
 deck = os.path.join(d, "deck.pptx"); prs.save(deck)
 ws = os.path.join(d, "ws"); os.makedirs(ws)
 pn.step_extract_notes(deck, ws, [1, 2, 3], "auto")
-ok(sorted(os.listdir(ws)) == ["note_sources.json", "slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"],
-   f"auto extraction {sorted(os.listdir(ws))}")
+ok(sorted(os.listdir(ws)) == ["note_baseline.json", "slide_1_ja.txt", "slide_2_en.txt", "slide_3_ko.txt"], f"auto extraction {sorted(os.listdir(ws))}")
 ws2 = os.path.join(d, "ws2"); os.makedirs(ws2)
 pn.step_extract_notes(deck, ws2, [2], "de")
 ok(os.listdir(ws2) == [], "--in-lang is a selector: a note of another language is left out")
 ws2b = os.path.join(d, "ws2b"); os.makedirs(ws2b)
 pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en")
-ok(sorted(os.listdir(ws2b)) == ["note_sources.json", "slide_2_en.txt"],
-   "--in-lang keeps only the notes of that language")
+ok(sorted(os.listdir(ws2b)) == ["note_baseline.json", "slide_2_en.txt"], "--in-lang keeps only the notes of that language")
 ok(pn.step_extract_notes(deck, ws2b, [1, 2, 3], "fr") == 0
    and pn.step_extract_notes(deck, ws2b, [1, 2, 3], "en") == 1,
    "extract reports what this run wrote, not what the workspace already held")
@@ -106,15 +104,17 @@ ok(pn.find_source_text(ws, 1, "auto", exclude_lang="de")[0] == "ja" and pn.find_
 # ---------------------------------------------------------------- translation
 class FakeTr:
     calls = []
-    def __init__(self, source, target):
+    glossaries = []
+    def __init__(self, model_id=None, device=None):
+        self.model_id = model_id
+    def translate(self, text, source, target, glossary=None):
         if target == "xx":
             raise ValueError("unsupported language")
-        self.s, self.t = source, target
-    def translate(self, text):
         FakeTr.calls.append(text)
-        return f"[{self.s}->{self.t}] {text}"
+        FakeTr.glossaries.append(glossary)
+        return f"[{source}->{target}] {text}"
 
-pn.GoogleTranslator = FakeTr
+pn.make_translator = FakeTr
 pn.step_translate_notes(ws, [1, 2, 3], "auto", "de")
 ok(read(os.path.join(ws, "slide_1_de.txt")).startswith("[ja->de]") and read(os.path.join(ws, "slide_2_de.txt")).startswith("[en->de]")
    and read(os.path.join(ws, "slide_3_de.txt")).startswith("[ko->de]"), "translate ja/en/ko -> de")
@@ -122,8 +122,11 @@ write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話です。")
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T)
 ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")), "existing translation kept without --retranslate")
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T, overwrite=True)
-ok(FakeTr.calls[-1] == "Basenpaareの話です。" and read(os.path.join(ws, "slide_1_ja.txt")) == "塩基対の話です。",
-   "--retranslate: dictionary applied to the note sent to the translator; note file unchanged")
+ok(FakeTr.calls[-1] == "塩基対の話です。" and ("塩基対", "Basenpaare") in (FakeTr.glossaries[-1] or [])
+   and read(os.path.join(ws, "slide_1_ja.txt")) == "塩基対の話です。",
+   "the whole note goes to the translator unchanged; dictionary terms occurring in it go as instructions")
+ok(pn.glossary_for("mRNAとRNA", [("RNA", "RNA", ""), ("mRNA", "Boten-RNA", ""), ("DNA", "DNA", "")])
+   == [("mRNA", "Boten-RNA"), ("RNA", "RNA")], "only terms occurring in the note, longest first")
 write(os.path.join(ws2, "slide_2_de.txt"), "Heute sprechen wir über Basenpaare.")
 pn.step_translate_notes(ws2, [2], "de", "ja")
 ok(read(os.path.join(ws2, "slide_2_ja.txt")).startswith("[de->ja]"), "translate de -> ja")
@@ -188,77 +191,6 @@ ok(seen.get("max_new_tokens") is not None
    and pn.chunk_token_budget("a" * 140, 14.0) < pn.chunk_token_budget("a" * 700, 14.0)
    and pn.chunk_token_budget("", 14.0) >= 20 * pn.QWEN3_CODEC_HZ,
    "generation is capped at a length the text can justify")
-
-# ---------------------------------------------------------------- audio staleness
-ws7 = os.path.join(d, "ws7"); os.makedirs(ws7)
-write(os.path.join(ws7, "slide_1_de.txt"), "Die Basenpaare.")
-write(os.path.join(ws7, "slide_2_de.txt"), "Die Zellen.")
-pn.step_generate_audio_qwen3(ws7, [1, 2], "de", "r.wav", reftxt, R_de, "qwen3-1.7B", "1.7B", "auto")
-ok(pn._load_audio_manifest(ws7).get("slide_1_de.qwen3-1.7B.m4a", {}).get("text_fingerprint")
-   == pn.text_fingerprint("Die Basenpaare."),
-   "synthesis records the fingerprint of the text an audio file was generated from")
-ok(pn.stale_audio_reasons(ws7, 1, "de", "qwen3-1.7B") == []
-   and pn.stale_audio_reasons(ws7, 2, "de", "qwen3-1.7B") == [], "freshly synthesized audio is not stale")
-write(os.path.join(ws7, "slide_1_de.txt"), "Die Basenpaare und RNA.")
-ok(any("text has changed since this audio was synthesized" in r for r in pn.stale_audio_reasons(ws7, 1, "de", "qwen3-1.7B"))
-   and pn.stale_audio_reasons(ws7, 2, "de", "qwen3-1.7B") == [],
-   "editing the text after synthesis is caught; an untouched slide is not flagged")
-
-prs7 = Presentation(); prs7.slides.add_slide(prs7.slide_layouts[5]); prs7.slides.add_slide(prs7.slide_layouts[5])
-deck7 = os.path.join(d, "deck7.pptx"); prs7.save(deck7)
-logs.clear()
-_, _, stale7 = pn.step_pack_pptx(deck7, os.path.join(d, "out7.pptx"), ws7, [1, 2], "de", "qwen3-1.7B",
-                                 source_lang="auto", writeback_notes=False)
-ok(stale7 == [1] and any("Slide #1: the de text has changed since this audio was synthesized" in m for m in logs)
-   and not any("Slide #2:" in m and "changed" in m for m in logs),
-   "pack warns about stale audio and returns which slides, even without --writeback-notes")
-
-ws8 = os.path.join(d, "ws8"); os.makedirs(ws8)
-write(os.path.join(ws8, "slide_1_de.txt"), "Eins.")
-write(os.path.join(ws8, "slide_2_de.txt"), "Zwei.")
-pn.record_audio_source(ws8, "slide_1_de.qwen3-1.7B.m4a", "Eins.")
-tmp8 = pn._prepare_file_workspace("synthesize", os.path.join(ws8, "slide_2_de.txt"))
-pn.record_audio_source(tmp8, "slide_2_de.qwen3-1.7B.m4a", "Zwei.")
-pn._sync_file_workspace(tmp8, os.path.join(ws8, "slide_2_de.txt"), "slide_2_de.txt")
-merged8 = pn._load_audio_manifest(ws8)
-ok("slide_1_de.qwen3-1.7B.m4a" in merged8 and "slide_2_de.qwen3-1.7B.m4a" in merged8,
-   "synthesizing one file of a workspace does not erase another slide's recorded audio fingerprint")
-
-# ---------------------------------------------------------------- extraction staleness
-prs9 = Presentation()
-s9a = prs9.slides.add_slide(prs9.slide_layouts[5]); s9a.notes_slide.notes_text_frame.text = "今日はDNAの話です。"
-s9b = prs9.slides.add_slide(prs9.slide_layouts[5]); s9b.notes_slide.notes_text_frame.text = "今日はRNAの話です。"
-deck9 = os.path.join(d, "deck9.pptx"); prs9.save(deck9)
-ws9 = os.path.join(d, "ws9"); os.makedirs(ws9)
-pn.step_extract_notes(deck9, ws9, [1, 2], "auto")
-prs9r = Presentation(deck9)
-ok(pn.stale_extraction_reason(ws9, prs9r.slides[0], 1, "ja") is None
-   and pn.stale_extraction_reason(ws9, prs9r.slides[1], 2, "ja") is None,
-   "freshly extracted notes are not stale")
-
-# hand-editing the workspace copy -- the documented, expected workflow -- is not
-# mistaken for the deck itself having moved on
-write(os.path.join(ws9, "slide_1_ja.txt"), "今日はDNAの構造の話です。")
-ok(pn.stale_extraction_reason(ws9, prs9r.slides[0], 1, "ja") is None,
-   "editing the workspace copy by hand is not flagged: the deck note itself is unchanged")
-
-# editing the note directly in PowerPoint, without re-extracting, is what the check is for
-prs9e = Presentation(deck9)
-prs9e.slides[1].notes_slide.notes_text_frame.text = "今日はmRNAワクチンの話です。"
-edited9 = os.path.join(d, "edited9.pptx"); prs9e.save(edited9)
-prs9er = Presentation(edited9)
-ok(pn.stale_extraction_reason(ws9, prs9er.slides[0], 1, "ja") is None,
-   "the untouched slide of the edited deck is still not flagged")
-reason9 = pn.stale_extraction_reason(ws9, prs9er.slides[1], 2, "ja")
-ok(reason9 is not None and "changed since it was last extracted" in reason9,
-   "editing the deck's own note without re-extracting is caught")
-
-logs.clear()
-AudioSegment.silent(duration=500).export(os.path.join(ws9, "slide_2_ja.qwen3-1.7B.m4a"), format="ipod")
-_, _, stale9 = pn.step_pack_pptx(edited9, os.path.join(d, "out9.pptx"), ws9, [1, 2], "ja", "qwen3-1.7B",
-                                 source_lang="auto", writeback_notes=False)
-ok(2 in stale9 and any("Slide #2: the deck's own ja note has changed since it was last extracted" in m for m in logs),
-   "pack itself warns when the deck's note has moved on since extraction")
 
 # ---------------------------------------------------------------- verification (ASR mocked)
 fw = types.ModuleType("faster_whisper")
@@ -357,7 +289,7 @@ z_out.close()
 for n, dur in [(1, 1800), (2, 2500), (3, 3200)]:
     AudioSegment.silent(duration=dur).export(os.path.join(ws, f"slide_{n}_de.v4.m4a"), format="ipod")
 out_deck = os.path.join(d, "out.pptx")
-pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4", source_lang="auto", writeback_notes=True)
+pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4", source_lang="auto")
 notes = Presentation(out_deck).slides[0].notes_slide.notes_text_frame.text
 info = pn.parse_structured_note(notes)
 ok(notes.startswith("=== pptx-narrator: narration [de] from [ja] #") and info and info["narration_lang"] == "de"
@@ -452,15 +384,110 @@ prs_s = Presentation(); s_ = prs_s.slides.add_slide(prs_s.slide_layouts[5]); s_.
 sp = os.path.join(d, "spoken.pptx"); prs_s.save(sp)
 ws6 = os.path.join(d, "ws6"); os.makedirs(ws6)
 pn.step_extract_notes(sp, ws6, [1], "auto")
-ok(sorted(os.listdir(ws6)) == ["note_sources.json", "slide_1_ja.txt"], "spoken narration block ignored on extraction")
+ok(sorted(os.listdir(ws6)) == ["note_baseline.json", "slide_1_ja.txt"], "spoken narration block ignored on extraction")
 
 # pack warns when the translation is older than the source note
 logs.clear()
 write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話を変更しました。")
-pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4", source_lang="auto", writeback_notes=True)
+pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4", source_lang="auto")
 note_old = pn.parse_structured_note(Presentation(os.path.join(d, "out2.pptx")).slides[0].notes_slide.notes_text_frame.text)
-ok(any("older version of the ja note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),
+ok(any("older version of the source note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),
    "stale translation flagged at pack time and marked by its original fingerprint")
+
+# ---------------------------------------------------------------- struck-through text in notes
+prs12 = Presentation()
+tf12 = prs12.slides.add_slide(prs12.slide_layouts[5]).notes_slide.notes_text_frame
+para = tf12.paragraphs[0]
+for text, strike in [("教科書の", None), ("RNA", "sngStrike"), ("DNAプライマーゼ", None),
+                     ("（旧称）", "dblStrike"), ("です。", None)]:
+    run = para.add_run(); run.text = text
+    if strike:
+        run._r.get_or_add_rPr().set("strike", strike)
+tf12.add_paragraph().text = "二段落目です。"
+deck12 = os.path.join(d, "deck12.pptx"); prs12.save(deck12)
+ws12 = os.path.join(d, "ws12"); os.makedirs(ws12)
+pn.step_extract_notes(deck12, ws12, [1], "ja")
+ok(read(os.path.join(ws12, "slide_1_ja.txt")) == "教科書のDNAプライマーゼです。\n二段落目です。",
+   "single and double struck-through text is left out of the extracted note")
+AudioSegment.silent(duration=300).export(os.path.join(ws12, "slide_1_ja.qwen3-1.7B.m4a"), format="ipod")
+_, written12, _ = pn.step_pack_pptx(deck12, os.path.join(d, "out12.pptx"), ws12, [1], "ja", "qwen3-1.7B",
+                                    update=True)
+ok(written12 == [] and "RNA" in Presentation(os.path.join(d, "out12.pptx")).slides[0].notes_slide.notes_text_frame.text,
+   "an unedited note with struck-through text is not rewritten (the strikethrough stays in the deck)")
+
+# ---------------------------------------------------------------- pack: notes and hand edits
+def note_of(path, n=1):
+    return Presentation(path).slides[n - 1].notes_slide.notes_text_frame.text
+
+prs10 = Presentation()
+for t in ["今日はDNAの話です。", "今日はRNAの話です。"]:
+    prs10.slides.add_slide(prs10.slide_layouts[5]).notes_slide.notes_text_frame.text = t
+deck10 = os.path.join(d, "deck10.pptx"); prs10.save(deck10)
+ws10 = os.path.join(d, "ws10"); os.makedirs(ws10)
+pn.step_extract_notes(deck10, ws10, [1], "auto")
+pn.step_extract_notes(deck10, ws10, [2], "auto")
+ok(sorted(pn._load_note_baseline(ws10)) == ["1", "2"],
+   "extracting some slides keeps the record of the slides extracted before")
+for n in (1, 2):
+    AudioSegment.silent(duration=400 + 100 * n).export(os.path.join(ws10, f"slide_{n}_ja.qwen3-1.7B.m4a"), format="ipod")
+
+# the documented workflow: edit the extracted text, synthesize, pack -> the note follows
+write(os.path.join(ws10, "slide_1_ja.txt"), "今日はDNAの構造の話です。")
+out10 = os.path.join(d, "out10.pptx")
+logs.clear()
+_, written10, mismatched10 = pn.step_pack_pptx(deck10, out10, ws10, [1, 2], "ja", "qwen3-1.7B")
+ok(note_of(out10, 1) == "今日はDNAの構造の話です。" and note_of(out10, 2) == "今日はRNAの話です。"
+   and written10 == [1] and mismatched10 == [] and not any("WARNING" in m for m in logs if "Slide #1" in m),
+   "text edited in the workspace is written into the note (the deck note was not touched)")
+
+# target audio: the note is left, and the mismatch is reported
+logs.clear()
+_, written, mismatched = pn.step_pack_pptx(deck10, os.path.join(d, "out10a.pptx"), ws10, [1, 2], "ja", "qwen3-1.7B",
+                                           targets={"audio"})
+ok(note_of(os.path.join(d, "out10a.pptx"), 1) == "今日はDNAの話です。" and written == [] and mismatched == [1]
+   and any("Slide #1: the note in the deck differs" in m for m in logs),
+   "target audio leaves the notes and warns where they no longer match the narration")
+
+# a note edited in the deck after extract is not overwritten ...
+prs10h = Presentation(out10)
+prs10h.slides[0].notes_slide.notes_text_frame.text = "手で直したノート"
+hand10 = os.path.join(d, "hand10.pptx"); prs10h.save(hand10)
+write(os.path.join(ws10, "slide_1_ja.txt"), "今日はDNAの二重らせんの話です。")
+logs.clear()
+_, written, mismatched = pn.step_pack_pptx(hand10, os.path.join(d, "out10b.pptx"), ws10, [1], "ja", "qwen3-1.7B")
+ok(note_of(os.path.join(d, "out10b.pptx"), 1) == "手で直したノート" and written == [] and mismatched == [1]
+   and any("Slide #1: the note was edited in the deck after extract" in m for m in logs),
+   "a note edited in the deck is protected, with a warning")
+# ... unless --forceupdate
+logs.clear()
+_, written, _ = pn.step_pack_pptx(hand10, os.path.join(d, "out10c.pptx"), ws10, [1], "ja", "qwen3-1.7B",
+                                  forceupdate=True)
+ok(note_of(os.path.join(d, "out10c.pptx"), 1) == "今日はDNAの二重らせんの話です。" and written == [1]
+   and any("overwriting it (--forceupdate)" in m for m in logs),
+   "--forceupdate overwrites it, with a warning")
+# a note pack itself wrote is not mistaken for a hand edit
+write(os.path.join(ws10, "slide_1_ja.txt"), "今日はDNAの複製の話です。")
+_, written, _ = pn.step_pack_pptx(os.path.join(d, "out10c.pptx"), os.path.join(d, "out10d.pptx"), ws10, [1],
+                                  "ja", "qwen3-1.7B")
+ok(written == [1] and note_of(os.path.join(d, "out10d.pptx"), 1) == "今日はDNAの複製の話です。",
+   "a note written by pack can be replaced by the next pack")
+
+# --update leaves out what is already the same
+logs.clear()
+embedded, written, _ = pn.step_pack_pptx(os.path.join(d, "out10d.pptx"), os.path.join(d, "out10e.pptx"), ws10,
+                                         [1], "ja", "qwen3-1.7B", update=True)
+ok(embedded == 0 and written == [] and any("already has this audio" in m for m in logs),
+   "--update leaves out the audio and the note that the deck already has")
+
+# no record of extract: a hand edit cannot be ruled out
+ws11 = os.path.join(d, "ws11"); os.makedirs(ws11)
+write(os.path.join(ws11, "slide_1_ja.txt"), "別のテキスト")
+_, written, _ = pn.step_pack_pptx(deck10, os.path.join(d, "out11.pptx"), ws11, [1], "ja", "qwen3-1.7B",
+                                  targets={"text"})
+ok(written == [] and note_of(os.path.join(d, "out11.pptx"), 1) == "今日はDNAの話です。",
+   "without a record of extract, the note is not overwritten")
+ok(pn.resolve_targets(None) == pn.resolve_targets("all") == {"audio", "text"}
+   and pn.resolve_targets("text") == {"text"}, "pack target: omitted means all")
 
 # ---------------------------------------------------------------- command line
 # The CLI writes .pptx_narrator_state.json and .pptx_narrator_resolved.toml into the
@@ -519,10 +546,12 @@ ok(eff["slide_pause"] == 0.5, "the command line overrides the configuration file
 eff = pn._merge_effective("pack", parser.parse_args(["pack", deck, "--out", ""]),
                           {"pack": {"out": "from_config.pptx"}}, parser)
 ok(eff["out"] is None, "an empty value on the command line takes a configured value back")
-cfg_true = {"pack": {"writeback_notes": True}}
-ok(pn._merge_effective("pack", parser.parse_args(["pack", deck]), cfg_true, parser)["writeback_notes"] is True
-   and pn._merge_effective("pack", parser.parse_args(["pack", deck, "--no-writeback-notes"]),
-                           cfg_true, parser)["writeback_notes"] is False,
+ok(parser.parse_args(["pack", deck, "text"]).target == "text"
+   and parser.parse_args(["pack", deck]).target is None, "pack takes the target after the deck")
+cfg_true = {"pack": {"update": True}}
+ok(pn._merge_effective("pack", parser.parse_args(["pack", deck]), cfg_true, parser)["update"] is True
+   and pn._merge_effective("pack", parser.parse_args(["pack", deck, "--no-update"]),
+                           cfg_true, parser)["update"] is False,
    "--no-... takes back a switch set in the configuration file")
 ok(pn._normalize_config_keys({"a-b": {"c-d": 1}}) == {"a_b": {"c_d": 1}},
    "hyphenated keys in the configuration file are accepted")

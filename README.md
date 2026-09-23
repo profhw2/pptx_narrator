@@ -8,7 +8,7 @@
 ## Features
 
 - **Note extraction** – presenter notes are exported per slide as editable text files; the language of each note is identified automatically; hidden slides are skipped.
-- **Translation** – notes can be translated into any language supported by Google Translate (via `deep-translator`); a dictionary applied to the notes beforehand fixes how technical terms are translated.
+- **Translation** – notes can be translated by a language model run locally (default [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)); each note is translated whole, and a translation dictionary tells the model how to translate particular terms. The result is a text file to be reviewed like any other note.
 - **Technical-term scanning** – acronyms, domain terms and number–unit expressions are collected into a dictionary for manual review.
 - **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
 - **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server). Which one sounds closer to the speaker is a matter of judgement and changes with engine versions; in the author's use Qwen3-TTS reproduces Japanese and English closely from a single Japanese reference recording, which is why it is the default; any default can be set in the configuration file.
@@ -19,14 +19,14 @@
 
 | Step | Languages |
 |---|---|
-| Note language identification | Kana/Hangul rules and [py3langid](https://github.com/adbar/py3langid), restricted to Google Translate languages |
-| `translate` | Any source/target pair supported by Google Translate |
+| Note language identification | Kana/Hangul rules and [py3langid](https://github.com/adbar/py3langid) |
+| `translate` | Whatever the translation model handles (Qwen3: over 100 languages and dialects according to its model card) |
 | `synthesize --engine qwen3` | zh, en, ja, ko, de, fr, ru, pt, es, it |
 | `synthesize --engine gpt_sovits` | zh, en, ja, ko, yue (Cantonese) |
 | `verify` | Japanese: kana-level comparison; other languages: character-level comparison of normalized text |
 | Built-in unit readings | Japanese only (other languages: `unit` entries in the dictionaries) |
 
-Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN`. Without `--in-lang`, `extract` identifies the language of each note from its text; notes too short or ambiguous to identify reliably ("Thank you.", a kanji-only title) are assigned the main language of the deck. The detected language is shown in the log and in the file name. `--in-lang` selects which languages to extract: a note in another language is reported and left out, and a requested language the deck does not contain stops the run with an error.
+Languages are written as codes such as `ja`, `en`, `de`, `zh-CN`. Without `--in-lang`, `extract` identifies the language of each note from its text; notes too short or ambiguous to identify reliably ("Thank you.", a kanji-only title) are assigned the main language of the deck. The detected language is shown in the log and in the file name. `--in-lang` selects which languages to extract: a note in another language is reported and left out, and a requested language the deck does not contain stops the run with an error.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ Languages are written as Google Translate codes such as `ja`, `en`, `de`, `zh-CN
 - One TTS engine:
   - **Qwen3-TTS**: installed with the `qwen3` extra below. Model weights (`Qwen/Qwen3-TTS-12Hz-{0.6B,1.7B}-Base`) are downloaded from Hugging Face on first use. A CUDA GPU or Apple Silicon (MPS) is strongly recommended.
   - **GPT-SoVITS**: a local GPT-SoVITS installation with its API server running, e.g. `python api_v2.py -a 127.0.0.1 -p 9880` in the GPT-SoVITS directory.
-- Network access for `translate` (Google Translate).
+- For `translate`: the translation model (default `Qwen/Qwen3-4B`, about 8 GB) is downloaded from Hugging Face on first use; `transformers` 4.51 or later. A CUDA GPU or Apple Silicon (MPS) is strongly recommended.
 
 ## Installation
 
@@ -86,26 +86,36 @@ pptx-narrator pack lecture.pptx --workspace ws --in-lang ja --engine qwen3 \
 
 ### Translated narration
 
-Translation is usually done once, while synthesis is repeated while readings are refined, so it is convenient to run them separately, each with its own dictionary:
+Translation is usually done once, while synthesis is repeated while readings are refined, so each step has its own dictionary:
 
 ```bash
-# 1. Extract the notes (language identified automatically) and collect terms to be translated
+# 1. Extract the notes (language identified automatically)
 pptx-narrator extract lecture.pptx --workspace ws
-pptx-narrator scan ws --in-lang ja --dict-file terms_ja_de.csv
-# 2. Fill in the German terms in terms_ja_de.csv, then translate
+# 2. Translate; terms_ja_de.csv (optional) lists terms and how to translate them
 pptx-narrator translate ws --in-lang ja --out-lang de --dict-file terms_ja_de.csv
-# 3. Review ws/slide_N_de.txt; collect candidate readings from the German text
+# 3. Review and correct ws/slide_N_de.txt; collect candidate readings from the German text
 pptx-narrator scan ws --in-lang de --dict-file readings_de.csv
-# 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed),
-#    writing the German narration above the original note
+# 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed)
 pptx-narrator synthesize ws --in-lang de --dict-file readings_de.csv \
   --engine qwen3 --ref-wav my_voice.wav --ref-text my_voice.txt
 pptx-narrator verify ws --in-lang de --engine qwen3
-pptx-narrator pack lecture.pptx --workspace ws --in-lang de --engine qwen3 \
-  --writeback-notes --out lecture_de.pptx
+pptx-narrator pack lecture.pptx --workspace ws --in-lang de --engine qwen3 --out lecture_de.pptx
 ```
 
-Existing translations are not overwritten; use `--retranslate` after changing the translation dictionary. Because `translate` and `synthesize` are separate commands, each is given its own dictionary: replacements meant as readings (e.g. `CRISPR,C R I S P R`) stay out of the translated text and of the written-back notes.
+Each note is given to the translation model whole, so every sentence is translated in the context of the note. The note is passed unchanged; the entries of the translation dictionary that occur in it are given to the model as instructions ("translate X as Y"). Existing translations are not overwritten; use `--retranslate` to translate again.
+
+Once written, a translated text is a note text like any other: review and correct it before synthesis. Machine translation, including by language models, makes mistakes that read fluently — a technical term rendered as a similar-sounding word, a sentence whose meaning is reversed, a detail left out.
+
+#### Translation models
+
+`--translate-model` takes the Hugging Face id of the model (default `Qwen/Qwen3-4B`). Which one to use depends on the machine and on how much correction the output may need:
+
+| Choice | Notes |
+|---|---|
+| `Qwen/Qwen3-4B` (default) | Runs on a laptop with Apple Silicon or a modest GPU (about 8 GB of weights). |
+| `Qwen/Qwen3-8B`, `Qwen/Qwen3-14B`, `Qwen/Qwen3-32B` | Larger models of the same family; more memory and time, and usually fewer errors. |
+| Another instruction-tuned model with a chat template | May work through the same option; not tested. |
+| A hosted service (DeepL, Google Cloud Translation, a commercial language model, …) | Not built in. Translate the notes there and save the results as `ws/slide_N_<lang>.txt`; the rest of the pipeline uses them like any other note. |
 
 ### Workspace files
 

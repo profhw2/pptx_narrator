@@ -22,7 +22,6 @@ import csv
 import json
 import requests
 from pptx import Presentation
-from deep_translator import GoogleTranslator
 from pydub import AudioSegment
 import nltk
 from pydub.effects import compress_dynamic_range, normalize
@@ -133,17 +132,12 @@ _language_identifier = None
 
 
 def _get_language_identifier():
-    """py3langid classifier restricted to languages that Google Translate accepts."""
+    """py3langid classifier (with normalized probabilities) over all its languages."""
     global _language_identifier
     if _language_identifier is None:
         from py3langid import langid
-        from deep_translator.constants import GOOGLE_LANGUAGES_TO_CODES
-        identifier = langid.LanguageIdentifier.from_modelpath(
+        _language_identifier = langid.LanguageIdentifier.from_modelpath(
             langid.MODEL_DIR / langid.MODEL_FILE, norm_probs=True)
-        google = set(GOOGLE_LANGUAGES_TO_CODES.values())
-        identifier.set_languages([c for c in set(identifier.nb_classes)
-                                  if _LANGID_TO_GOOGLE.get(c, c) in google or c == "zh"])
-        _language_identifier = identifier
     return _language_identifier
 
 
@@ -299,11 +293,19 @@ def record_translation(workspace_dir, slide_num, target_lang, source_lang, sourc
         json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
 
 
-AUDIO_MANIFEST = "audio_sources.json"
+# ==========================================
+# Note baseline (hand-edit detection for pack)
+# ==========================================
+# extract records the fingerprint of each slide's note as it read it, and pack
+# records the fingerprint of any note it writes. A note whose fingerprint is
+# neither was edited in the deck by hand since, and pack does not overwrite it
+# unless --forceupdate is given.
+NOTE_BASELINE = "note_baseline.json"
+PACK_TARGETS = ("all", "audio", "text")
 
 
-def _load_audio_manifest(workspace_dir):
-    path = os.path.join(workspace_dir, AUDIO_MANIFEST)
+def _load_note_baseline(workspace_dir):
+    path = os.path.join(workspace_dir, NOTE_BASELINE)
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -313,112 +315,75 @@ def _load_audio_manifest(workspace_dir):
     return {}
 
 
-def record_audio_source(workspace_dir, audio_name, source_text):
-    """Remember the fingerprint of the text an audio file was synthesized from.
-
-    Recorded from the raw note/translation text, before dictionaries and the
-    letter map are applied: those change how a slide is read, not what it says,
-    and are not what a reader means by the text changing.
-    """
-    manifest = _load_audio_manifest(workspace_dir)
-    manifest[audio_name] = {"text_fingerprint": text_fingerprint(source_text)}
-    with open(os.path.join(workspace_dir, AUDIO_MANIFEST), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
+def _save_note_baseline(workspace_dir, baseline):
+    with open(os.path.join(workspace_dir, NOTE_BASELINE), "w", encoding="utf-8") as f:
+        json.dump(baseline, f, ensure_ascii=False, indent=1, sort_keys=True)
 
 
-NOTE_MANIFEST = "note_sources.json"
+def _note_is_known(entry, fingerprint):
+    """True if the note is one that extract read or pack wrote."""
+    return fingerprint in {entry.get("extracted"), entry.get("packed")} - {None}
 
 
-def _load_note_manifest(workspace_dir):
-    path = os.path.join(workspace_dir, NOTE_MANIFEST)
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not read {path}: {e}")
-    return {}
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
 
-def record_note_source(workspace_dir, text_name, deck_text):
-    """Remember the fingerprint of the deck note a workspace text file was extracted from.
-
-    Without this, comparing a workspace text file against the deck's current note
-    cannot tell "the file was edited on purpose after extraction" (expected; the
-    workspace copy is meant to be worked on) from "the deck's own note moved on
-    and extract was never re-run to pick it up" (silent staleness): both leave the
-    file and the live deck note different. Recording what extract itself saw settles
-    it, by comparing the live deck note against this instead of against the file.
-    """
-    manifest = _load_note_manifest(workspace_dir)
-    manifest[text_name] = {"deck_fingerprint": text_fingerprint(deck_text)}
-    with open(os.path.join(workspace_dir, NOTE_MANIFEST), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
+def _is_struck(run):
+    rpr = run.find(_A_NS + "rPr")
+    return rpr is not None and rpr.get("strike") in ("sngStrike", "dblStrike")
 
 
-def deck_note_source_text(slide, expected_lang):
-    """The plain source-language text of a slide's own PowerPoint note, right now.
-
-    Read the same way step_extract_notes reads it (_deck_raw_note_text), so that
-    comparing this against what extract last recorded is a comparison of like with
-    like and not a false alarm over a cleanup extract itself already does. None
-    when the slide has no notes, or a structured note's source part is tagged a
-    different language than expected.
-    """
-    raw = _deck_raw_note_text(slide)
-    if not raw:
-        return None
-    info = parse_structured_note(raw)
-    if info is not None:
-        if info["source_lang"] and base_lang(info["source_lang"]) != base_lang(expected_lang):
-            return None
-        return info["source_text"]
-    return raw
-
-
-def stale_extraction_reason(workspace_dir, slide, slide_num, lang):
-    """Whether a slide's own PowerPoint note has moved on since it was last extracted."""
-    entry = _load_note_manifest(workspace_dir).get(text_filename(slide_num, lang))
-    if not entry:
-        return None
-    deck_text = deck_note_source_text(slide, lang)
-    if deck_text is None:
-        return None
-    if text_fingerprint(deck_text) != entry["deck_fingerprint"]:
-        return f"the deck's own {lang} note has changed since it was last extracted (re-run extract)"
-    return None
+def _text_frame_text(text_frame, struck=None):
+    """The text of a text frame as python-pptx gives it (paragraphs joined by \\n,
+    line breaks as \\v), leaving out runs with a single or double strikethrough:
+    struck-through text in a note is text the author has deleted. Struck runs are
+    appended to `struck` when a list is given."""
+    paragraphs = []
+    for p in text_frame._txBody.iter(_A_NS + "p"):
+        parts = []
+        for child in p:
+            tag = child.tag
+            if tag == _A_NS + "r":
+                t = child.find(_A_NS + "t")
+                text = (t.text or "") if t is not None else ""
+                if _is_struck(child):
+                    if struck is not None and text:
+                        struck.append(text)
+                    continue
+                parts.append(text)
+            elif tag == _A_NS + "fld":
+                t = child.find(_A_NS + "t")
+                parts.append((t.text or "") if t is not None else "")
+            elif tag == _A_NS + "br":
+                parts.append("\v")
+        paragraphs.append("".join(parts))
+    return "\n".join(paragraphs)
 
 
-def stale_audio_reasons(workspace_dir, slide_num, lang, model_label):
-    """Reasons the audio of one slide may no longer match the text it should narrate.
+def _slide_note_raw(slide, struck=None):
+    """The note of a slide as extract reads it: the text of every text shape in the
+    notes page, excluding slide-number placeholders and struck-through text."""
+    if not slide.has_notes_slide:
+        return ""
+    text_list = []
+    for shape in slide.notes_slide.shapes:
+        if shape.has_text_frame:
+            found = []
+            text = _text_frame_text(shape.text_frame, found).strip()
+            if text and not text.isdigit():
+                text_list.append(text)
+                if struck is not None:
+                    struck.extend(found)
+    return "\n".join(text_list).strip()
 
-    Two independent things can go stale, and both are reported when they apply:
-    the narration text itself may have been edited (or resynthesized text
-    replaced by hand) since the audio was generated from it, and, when the
-    narration is a translation, the source note it was translated from may
-    have been edited since without --retranslate having been run.
-    """
-    reasons = []
 
-    audio_manifest = _load_audio_manifest(workspace_dir)
-    audio_entry = audio_manifest.get(audio_filename(slide_num, lang, model_label))
-    text_p = os.path.join(workspace_dir, text_filename(slide_num, lang))
-    if audio_entry and os.path.exists(text_p):
-        if text_fingerprint(_read_text(text_p)) != audio_entry["text_fingerprint"]:
-            reasons.append(f"the {lang} text has changed since this audio was synthesized from it "
-                           f"(re-run synthesize)")
-
-    translation_manifest = _load_manifest(workspace_dir)
-    translation_entry = translation_manifest.get(str(slide_num), {}).get(lang)
-    if translation_entry and translation_entry.get("source_fingerprint"):
-        src_lang = translation_entry.get("source_lang")
-        src_p = os.path.join(workspace_dir, text_filename(slide_num, src_lang)) if src_lang else None
-        if src_p and os.path.exists(src_p):
-            if text_fingerprint(_read_text(src_p)) != translation_entry["source_fingerprint"]:
-                reasons.append(f"the {lang} narration was translated from an older version of the "
-                               f"{src_lang} note (re-run translate --retranslate)")
-
-    return reasons
+def resolve_targets(target_arg):
+    """pack's positional target -> set of {"audio", "text"} (omitted = all)."""
+    if not target_arg or target_arg == "all":
+        return {"audio", "text"}
+    if target_arg in ("audio", "text"):
+        return {target_arg}
+    raise ValueError(f"Invalid target: {target_arg}. Use 'audio', 'text', or 'all'.")
 
 
 # ==========================================
@@ -592,7 +557,6 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
         "VI": "ろく", "VII": "なな", "VIII": "はち", "IX": "きゅう", "X": "じゅう",
     }
     tgt_base = base_lang(target_lang)
-    translator = None
     new_entries = []
     for term in sorted(candidates):
         repl = ""
@@ -601,22 +565,6 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
                 repl = ROMAN_NUMERAL_READINGS[term]
             elif re.match(r'^[A-Z]+$', term):
                 repl = " ".join(term)
-            elif re.match(r'^[a-zA-Z]+$', term) and tgt_base != "en":
-                if translator is None:
-                    try:
-                        translator = GoogleTranslator(source='en', target=target_lang)
-                    except Exception as e:
-                        logger.warning(f"Reading guesses by translation disabled for '{target_lang}': {e}")
-                        translator = False
-                if translator:
-                    try:
-                        guess = translator.translate(term) or ""
-                    except Exception:
-                        guess = ""
-                    if tgt_base == "ja":
-                        repl = guess if (guess != term and is_japanese(guess)) else ""
-                    else:
-                        repl = guess if guess.strip().lower() != term.lower() else ""
             elif tgt_base == "ja" and is_japanese(term):
                 repl = term
         new_entries.append((term, repl))
@@ -849,30 +797,11 @@ def apply_dictionary(text, entries, lang, letter_map=None, builtin_units=True):
 # ==========================================
 # Pipeline Steps
 # ==========================================
-def _deck_raw_note_text(slide):
-    """The presenter note of a slide, joined across text frames and cleaned.
-
-    The single place this text is read out of a deck, so that a later check of
-    whether a slide's note has changed compares like with like (see
-    deck_note_source_text).
-    """
-    if not slide.has_notes_slide:
-        return ""
-    text_list = []
-    for shape in slide.notes_slide.shapes:
-        if shape.has_text_frame:
-            text = shape.text.strip()
-            if text and not text.isdigit():
-                text_list.append(text)
-    raw_text = "\n".join(text_list).strip()
-    clean_text = raw_text.replace('​', '').replace('‌', '').replace('‍', '')
-    return re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
-
-
 def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="auto"):
     logger.info("--- [Option: Extract] Extracting Notes ---")
     prs = Presentation(pptx_path)
     plain, structured = {}, {}
+    raw_fingerprints, extracted = {}, []
     for slide_num in requested_slides:
         if slide_num > len(prs.slides): continue
         slide = prs.slides[slide_num - 1]
@@ -881,7 +810,15 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
             logger.info(f"Slide #{slide_num} is a hidden slide (skipped)")
             continue
 
-        txt = _deck_raw_note_text(slide)
+        struck = []
+        raw_text = _slide_note_raw(slide, struck)
+        if struck:
+            logger.info(f"Slide #{slide_num}: left out {len(struck)} struck-through passage(s): "
+                        + ", ".join(repr(t) for t in struck[:5]) + (" ..." if len(struck) > 5 else ""))
+        raw_fingerprints[slide_num] = text_fingerprint(raw_text)
+
+        clean_text = raw_text.replace('​', '').replace('‌', '').replace('‍', '')
+        txt = re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
         if not txt:
             logger.info(f"Slide #{slide_num} has no notes (skipped)")
             continue
@@ -914,8 +851,8 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         name = text_filename(slide_num, languages[slide_num])
         with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
             f.write(txt)
-        record_note_source(workspace_dir, name, txt)
         written += 1
+        extracted.append(slide_num)
         logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {languages[slide_num]}).")
 
     for slide_num, info in structured.items():
@@ -927,8 +864,8 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         src_name = text_filename(slide_num, src_lang)
         with open(os.path.join(workspace_dir, src_name), "w", encoding="utf-8") as f:
             f.write(info["source_text"])
-        record_note_source(workspace_dir, src_name, info["source_text"])
         written += 1
+        extracted.append(slide_num)
         logger.info(f"Slide #{slide_num}: structured note; source part extracted to {src_name} (language: {src_lang}).")
 
         narr_lang = info["narration_lang"]
@@ -953,40 +890,100 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     if source_lang == "auto" and languages:
         summary = Counter(languages.values()).most_common()
         logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
+
+    # Record the notes as read, for pack's hand-edit check. Slides not extracted
+    # in this run keep their earlier record.
+    if extracted:
+        baseline = _load_note_baseline(workspace_dir)
+        baseline.update({str(n): {"extracted": raw_fingerprints[n]} for n in extracted})
+        _save_note_baseline(workspace_dir, baseline)
+
     return written
 
-# Google Translate accepts about five requests per second. The notes are translated
-# line by line, which is well within that for one deck, but a long deck run back to
-# back with another can cross it, so the requests are spaced and a refusal is waited out.
-TRANSLATE_MIN_INTERVAL = 0.25
-TRANSLATE_RETRIES = 4
-_last_translate_call = [0.0]
+# ------------------------------------------
+# Translation
+# ------------------------------------------
+# Notes are translated by an instruction-tuned language model run locally through
+# transformers (default Qwen/Qwen3-4B; see README for larger models). Each note is
+# given whole, so the model sees the context of every sentence. Entries of the
+# translation dictionary (translate --dict-file) that occur in a note are given to the
+# model as instructions ("render X as Y"); the note itself is passed unchanged.
+TRANSLATE_MODEL_DEFAULT = "Qwen/Qwen3-4B"
+
+LANGUAGE_NAMES = {
+    "ja": "Japanese", "en": "English", "de": "German", "fr": "French", "es": "Spanish",
+    "it": "Italian", "pt": "Portuguese", "ru": "Russian", "ko": "Korean", "zh-CN": "Simplified Chinese",
+    "zh-TW": "Traditional Chinese", "nl": "Dutch", "sv": "Swedish", "pl": "Polish", "tr": "Turkish",
+    "vi": "Vietnamese", "th": "Thai", "id": "Indonesian", "ar": "Arabic", "iw": "Hebrew", "hi": "Hindi",
+}
 
 
-def _translate_line(translator, text, attempts=TRANSLATE_RETRIES):
-    """One translation request, spaced out and retried when the service refuses."""
-    delay = 1.0
-    for attempt in range(1, attempts + 1):
-        wait = TRANSLATE_MIN_INTERVAL - (time.monotonic() - _last_translate_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        try:
-            _last_translate_call[0] = time.monotonic()
-            return translator.translate(text) or ""
-        except Exception as e:
-            if attempt == attempts or "too many requests" not in str(e).lower():
-                raise
-            logger.warning(f"Translation rate limit reached; waiting {delay:.0f}s "
-                           f"(attempt {attempt} of {attempts - 1})")
-            time.sleep(delay)
-            delay *= 2
-    return ""
+def language_name(code):
+    return LANGUAGE_NAMES.get(code) or LANGUAGE_NAMES.get(base_lang(code)) or code
+
+
+class LLMTranslator:
+    """Translation with a causal language model that has a chat template."""
+
+    def __init__(self, model_id=TRANSLATE_MODEL_DEFAULT, device="auto"):
+        self.model_id = model_id
+        self.device = resolve_torch_device(device)
+        self._tok = self._model = None
+
+    def _load(self):
+        if self._model is None:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
+            logger.info(f"Loading translation model {self.model_id} on {self.device}...")
+            self._tok = AutoTokenizer.from_pretrained(self.model_id)
+            self._model = AutoModelForCausalLM.from_pretrained(self.model_id, torch_dtype=dtype)
+            self._model.to(self.device).eval()
+
+    def translate(self, text, source, target, glossary=None):
+        import torch
+        self._load()
+        system = (f"You translate the presenter notes of a lecture slide deck from {language_name(source)} "
+                  f"into {language_name(target)}. The notes are read aloud as narration. Translate "
+                  f"faithfully and completely, without adding or leaving out content, keep the paragraph "
+                  f"breaks, and output only the translation.")
+        if glossary:
+            system += ("\nTranslate the following terms as given:\n"
+                       + "\n".join(f"- {term} -> {rendering}" for term, rendering in glossary))
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
+        try:  # Qwen3: answer directly, without a reasoning block
+            prompt = self._tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                                   enable_thinking=False)
+        except TypeError:
+            prompt = self._tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        ids = self._tok(prompt, return_tensors="pt").to(self.device)
+        torch.manual_seed(0)
+        with torch.no_grad():
+            # sampling settings recommended on the Qwen3 model card for non-thinking use
+            out = self._model.generate(**ids, max_new_tokens=max(256, 4 * len(text)), do_sample=True,
+                                       temperature=0.7, top_p=0.8, top_k=20)
+        answer = self._tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=True)
+        return re.sub(r"(?s)^\s*<think>.*?</think>\s*", "", answer).strip()
+
+
+def make_translator(model_id=TRANSLATE_MODEL_DEFAULT, device="auto"):
+    return LLMTranslator(model_id, device)
+
+
+def glossary_for(text, dictionary):
+    """(term, rendering) pairs of the dictionary whose term occurs in the text, longest first."""
+    seen, out = set(), []
+    for term, repl, _typ in sorted(dictionary or [], key=lambda e: -len(e[0])):
+        if term and repl and term not in seen and term in text:
+            seen.add(term)
+            out.append((term, repl))
+    return out
 
 
 def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang,
-                         dictionary=None, overwrite=False):
-    logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' ---")
-    translators = {}
+                         dictionary=None, overwrite=False, model=TRANSLATE_MODEL_DEFAULT, device="auto"):
+    logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' with {model} ---")
+    translator = None
     sources_found = 0
     for slide_num in requested_slides:
         tgt_p = os.path.join(workspace_dir, text_filename(slide_num, target_lang))
@@ -1001,35 +998,23 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
             text = f.read().strip()
         if not text:
             continue
-
-        key = (src_lang, target_lang)
-        if key not in translators:
-            try:
-                translators[key] = GoogleTranslator(source=src_lang, target=target_lang)
-            except Exception as e:
-                logger.error(f"Translation {src_lang} -> {target_lang} is not available: {e}")
-                return
-        translator = translators[key]
-
-        translated_lines = []
-        for line in text.split('\n'):
-            if not line.strip():
-                translated_lines.append("")
-                continue
-            line_in = line.strip()
-            if dictionary:
-                line_in = apply_dictionary(line_in, dictionary, src_lang, builtin_units=False)
-            try:
-                translated_lines.append(_translate_line(translator, line_in))
-            except Exception as e:
-                logger.error(f"Slide {slide_num} translation error: {e}")
-                translated_lines.append("")
-
-        if any(translated_lines):
-            with open(tgt_p, "w", encoding="utf-8") as out_f:
-                out_f.write('\n'.join(translated_lines))
-            record_translation(workspace_dir, slide_num, target_lang, src_lang, text)
-            logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang}.")
+        if translator is None:
+            translator = make_translator(model, device)
+        glossary = glossary_for(text, dictionary)
+        t0 = time.time()
+        try:
+            translated = translator.translate(text, src_lang, target_lang, glossary=glossary or None)
+        except Exception as e:
+            logger.error(f"Slide #{slide_num}: translation {src_lang} -> {target_lang} failed: {e}")
+            continue
+        if not translated.strip():
+            logger.error(f"Slide #{slide_num}: the translation came back empty (not written).")
+            continue
+        with open(tgt_p, "w", encoding="utf-8") as out_f:
+            out_f.write(translated.strip() + "\n")
+        record_translation(workspace_dir, slide_num, target_lang, src_lang, text)
+        logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang} "
+                    f"({time.time() - t0:.1f}s{', %d dictionary term(s)' % len(glossary) if glossary else ''}).")
     return sources_found
 
 def step_generate_audio(
@@ -1065,8 +1050,7 @@ def step_generate_audio(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            raw_text = f.read().strip()
-        spoken_text = apply_dictionary(raw_text, dictionaries, lang, letter_map=letter_map)
+            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
 
@@ -1099,7 +1083,6 @@ def step_generate_audio(
                 audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
                              format="ipod")
                 os.remove(wav_p)
-                record_audio_source(workspace_dir, audio_filename(slide_num, lang, model_label), raw_text)
                 stats.add(slide_num, time.time() - started, len(audio))
             else:
                 logger.error(f"Slide {slide_num} TTS failed! Server returned [{res.status_code}]: {res.text}")
@@ -1256,8 +1239,7 @@ def step_generate_audio_qwen3(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            raw_text = f.read().strip()
-        spoken_text = apply_dictionary(raw_text, dictionaries, lang, letter_map=letter_map)
+            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
 
@@ -1316,7 +1298,6 @@ def step_generate_audio_qwen3(
                          format="ipod")
 
             os.remove(wav_p)
-            record_audio_source(workspace_dir, audio_filename(slide_num, lang, model_label), raw_text)
             stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
             logger.error(f"Slide {slide_num} Qwen3-TTS generation error: {e}")
@@ -1534,99 +1515,145 @@ def _read_text(path):
 RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "events": ("events",), "none": ()}
 
 
+def _narration_note(workspace_dir, s_num, lang, source_lang, manifest):
+    """The note pack writes for a slide: the text the audio was synthesized from, with
+    the note it was translated from when there is one. None if there is no such text."""
+    narration = _read_text(os.path.join(workspace_dir, text_filename(s_num, lang)))
+    if not narration:
+        return None
+    src_lang, src_p = find_source_text(workspace_dir, s_num, source_lang, exclude_lang=lang)
+    original = _read_text(src_p) if src_p is not None else ""
+    if original and original != narration:
+        fingerprint = (manifest.get(str(s_num), {}).get(lang) or {}).get("source_fingerprint")
+        if fingerprint and fingerprint != text_fingerprint(original):
+            logger.warning(f"Slide #{s_num}: the {lang} narration was translated from an older version "
+                           f"of the source note (run --translate --retranslate to update it).")
+        return compose_structured_note(lang, narration, src_lang, original, fingerprint=fingerprint)
+    return narration
+
+
+def _slide_audio_matches(pkg_dir, slide_part, audio_path):
+    """True if the slide already plays exactly this audio file."""
+    slide_p = os.path.join(pkg_dir, *slide_part.split("/"))
+    rels_p = os.path.join(os.path.dirname(slide_p), "_rels", os.path.basename(slide_p) + ".rels")
+    if not os.path.exists(rels_p):
+        return False
+    with open(rels_p, encoding="utf-8") as f:
+        rels_xml = f.read()
+    want = _sha256_file(audio_path)
+    for _, attrs in _rel_elements(rels_xml):
+        if attrs.get("Type") not in (REL_AUDIO, REL_MEDIA) or attrs.get("TargetMode") == "External":
+            continue
+        target = os.path.normpath(os.path.join(os.path.dirname(slide_p), *attrs.get("Target", "").split("/")))
+        if os.path.isfile(target) and _sha256_file(target) == want:
+            return True
+    return False
+
+
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
-                   source_lang="auto", writeback_notes=False,
+                   source_lang="auto", targets=None, update=False, forceupdate=False,
                    remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
+    """Write the narration audio and/or the text it was synthesized from into the deck.
+
+    targets: subset of {"audio", "text"} (default: both).
+    update: leave out audio and notes that are already the same in the deck.
+    forceupdate: overwrite notes edited in the deck since extract (with a warning).
+    """
     logger.info("--- [Option: Pack] Rebuilding PPTX ---")
+    targets = set(targets or {"audio", "text"})
     prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
-    notes_written = 0
-    stale_slides = []
+    baseline = _load_note_baseline(workspace_dir)
+    notes_written, protected, mismatched = [], [], []
+
     for i, slide in enumerate(prs.slides):
         s_num = i + 1
         if s_num not in requested_slides:
             continue
+        note_text = _narration_note(workspace_dir, s_num, lang, source_lang, manifest)
+        if note_text is None:
+            continue
+        current = _slide_note_raw(slide)
+        differs = text_fingerprint(note_text) != text_fingerprint(current)
+        if not differs:
+            # Already the same; rewriting changes nothing, and --update leaves it out.
+            if "text" in targets and not update:
+                slide.notes_slide.notes_text_frame.text = note_text
+            continue
 
-        # The chain from the deck's own note to the packed audio has three links,
-        # and any of them can have moved on without the next one catching up:
-        # the deck's note may have been edited (in PowerPoint) since it was last
-        # extracted; the workspace text a translation came from may have been
-        # edited since without --retranslate; and the text audio was synthesized
-        # from may have been edited (or replaced) since synthesis. Checked
-        # regardless of --writeback-notes, since the audio is packed either way
-        # and a mismatch is otherwise silent -- comparing the deck's live note
-        # against what extract last saw (not against the workspace text file,
-        # which is meant to be edited by hand after extraction) is what tells
-        # "edited on purpose" apart from "the deck moved on and was never
-        # re-extracted".
-        src_lang, src_p = find_source_text(workspace_dir, s_num, source_lang, exclude_lang=lang)
-        original_lang = src_lang if src_p is not None else lang
+        if "text" not in targets:
+            mismatched.append(s_num)
+            logger.warning(f"Slide #{s_num}: the note in the deck differs from the text the audio was "
+                           f"synthesized from ({text_filename(s_num, lang)}); notes are not written "
+                           "with target 'audio'.")
+            continue
 
-        reasons = stale_audio_reasons(workspace_dir, s_num, lang, model_label)
-        extraction_reason = stale_extraction_reason(workspace_dir, slide, s_num, original_lang)
-        if extraction_reason:
-            reasons = [extraction_reason] + reasons
-        if reasons:
-            stale_slides.append(s_num)
-            for reason in reasons:
-                logger.warning(f"Slide #{s_num}: {reason}.")
+        entry = baseline.get(str(s_num))
+        if entry is None:
+            reason = "there is no record of extract reading this note, so a hand edit cannot be ruled out"
+        elif not _note_is_known(entry, text_fingerprint(current)):
+            reason = "the note was edited in the deck after extract"
+        else:
+            reason = None
 
-        if writeback_notes:
-            text_p = os.path.join(workspace_dir, text_filename(s_num, lang))
-            narration = _read_text(text_p)
-            if src_p is not None:
-                original = _read_text(src_p)
-            else:
-                original = _read_text(text_p)
+        if reason and not forceupdate:
+            protected.append(s_num)
+            mismatched.append(s_num)
+            logger.warning(f"Slide #{s_num}: {reason}; the note is not overwritten, and it differs from "
+                           f"the text the audio was synthesized from ({text_filename(s_num, lang)}). "
+                           "Re-extract after merging the edit, or use --forceupdate to overwrite it.")
+            continue
+        if reason:
+            logger.warning(f"Slide #{s_num}: {reason}; overwriting it (--forceupdate).")
 
-            if not narration and not original:
-                continue
-            if narration and original and narration != original:
-                fingerprint = None
-                entry = manifest.get(str(s_num), {}).get(lang)
-                if src_p is not None and entry and entry.get("source_fingerprint"):
-                    fingerprint = entry["source_fingerprint"]
-                note_text = compose_structured_note(lang, narration, original_lang, original,
-                                                    fingerprint=fingerprint)
-            else:
-                note_text = narration or original
+        slide.notes_slide.notes_text_frame.text = note_text
+        baseline.setdefault(str(s_num), {})["packed"] = text_fingerprint(note_text)
+        notes_written.append(s_num)
+        logger.info(f"Slide #{s_num}: note replaced with {text_filename(s_num, lang)}.")
 
-            logger.info(f"Slide #{s_num}: Updating notes...")
-            notes_slide = slide.notes_slide
-            if notes_slide.notes_text_frame is not None:
-                notes_slide.notes_text_frame.text = note_text
-                notes_written += 1
-            else:
-                logger.warning(f"Slide #{s_num}: No text frame in notes slide (skipped)")
+    if notes_written:
+        _save_note_baseline(workspace_dir, baseline)
 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)
+    embedded, audio_same = 0, 0
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(tmp_pptx, 'r') as z:
             z.extractall(tmpdir)
         slide_w, slide_h = _slide_size(tmpdir)
         slide_parts = _slide_part_paths(tmpdir)
-        embedded = 0
-        for s_num in requested_slides:
-            m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
-            if os.path.exists(m4a_p) and s_num <= len(slide_parts):
-                embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
-                                      slide_w, slide_h, slide_part=slide_parts[s_num - 1],
-                                      remove_recorded=remove_recorded, icon_outside=icon_outside,
-                                      pause_ms=pause_ms)
-                embedded += 1
+        if "audio" in targets:
+            for s_num in requested_slides:
+                m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
+                if not os.path.exists(m4a_p) or s_num > len(slide_parts):
+                    continue
+                if update and _slide_audio_matches(tmpdir, slide_parts[s_num - 1], m4a_p):
+                    audio_same += 1
+                    logger.info(f"Slide #{s_num}: the deck already has this audio (left as is, --update).")
+                    continue
+                if embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
+                                         slide_w, slide_h, slide_part=slide_parts[s_num - 1],
+                                         remove_recorded=remove_recorded, icon_outside=icon_outside,
+                                         pause_ms=pause_ms):
+                    embedded += 1
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
         os.replace(archive_path, output_pptx)
     os.remove(tmp_pptx)
-    summary = f"Packed {embedded} slide(s); wrote back notes on {notes_written} slide(s)."
-    if stale_slides:
-        summary += (f" {len(stale_slides)} slide(s) narrated from out-of-date text (see warnings above): "
-                    + ", ".join(str(n) for n in stale_slides) + ".")
+
+    summary = f"Packed audio on {embedded} slide(s); wrote notes on {len(notes_written)} slide(s)."
+    if audio_same:
+        summary += f" {audio_same} slide(s) already had the same audio."
     logger.info(summary)
+    if protected:
+        logger.warning("Notes not overwritten because they were edited in the deck: "
+                       + ", ".join(map(str, protected)) + ".")
+    if mismatched:
+        logger.warning("Slides whose note does not match their narration: "
+                       + ", ".join(map(str, sorted(set(mismatched)))) + ".")
     logger.info(f"Final output saved to: {output_pptx}")
-    return embedded, notes_written, stale_slides
+    return embedded, notes_written, sorted(set(mismatched))
 
 
 # ------------------------------------------
@@ -2114,10 +2141,6 @@ def _file_role(name):
         return "verification differences"
     if name == TRANSLATION_MANIFEST:
         return "translation manifest"
-    if name == AUDIO_MANIFEST:
-        return "audio source manifest"
-    if name == NOTE_MANIFEST:
-        return "note source manifest"
     if _TEXT_FILE_RE.match(name):
         return "note text"
     if name.lower().endswith((".m4a", ".wav")):
@@ -2459,7 +2482,11 @@ def build_parser(config_values=None):
     _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
     _add(p, "--out-lang", dest="out_lang", type=normalize_lang, default=None, help="Language of the translated output")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
-         help="Dictionary CSV(s) applied before translation")
+         help="Translation dictionary CSV(s): terms of the notes and how to\ntranslate them, given to the model as instructions")
+    _add(p, "--translate-model", dest="translate_model", default=None,
+         help="Hugging Face id of the translation model (default: Qwen/Qwen3-4B;\nsee README for alternatives)")
+    _add(p, "--translate-device", dest="translate_device", default=None,
+         help="auto / cuda:0 / mps / cpu (default: auto)")
     _add(p, "--retranslate", dest="retranslate", action="store_true", default=None,
          help="Overwrite existing translations")
     _add(p, "--workspace", dest="workspace", default=None,
@@ -2530,6 +2557,9 @@ def build_parser(config_values=None):
                        description="Write the generated audio and the slide timings into the deck, which\nthen plays by itself and can be exported as a video.",
                        formatter_class=HelpFormatter)
     p.add_argument("input", nargs="?", help="Original/input PPTX file")
+    p.add_argument("target", nargs="?", default=None, choices=PACK_TARGETS, metavar="target",
+                   help="What to write into the deck: audio, text (the text the audio was\n"
+                        "synthesized from, into the notes), or all (default: all)")
     _add(p, "--workspace", dest="workspace", default=None,
          help="Workspace containing generated text/audio (required unless recoverable from state)")
     _add(p, "--out", default=None, help="Output PPTX path")
@@ -2541,8 +2571,10 @@ def build_parser(config_values=None):
          help="Qwen3-TTS model size (default: 1.7B)")
     _add(p, "--slides", dest="slides", default=None,
          help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
-    _add(p, "--writeback-notes", dest="writeback_notes", action="store_true", default=None,
-         help="Write the narration text above the original note, between marker\nlines that extract recognizes (default: off)")
+    _add(p, "--update", dest="update", action="store_true", default=None,
+         help="Leave out audio and notes that are already the same in the deck\n(default: off)")
+    _add(p, "--forceupdate", dest="forceupdate", action="store_true", default=None,
+         help="Overwrite notes edited in the deck since extract (default: off)")
     _add(p, "--slide-pause", dest="slide_pause", type=float, default=None,
          help="Seconds between the end of the narration and the automatic\nslide advance (default: 1.0)")
     _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None,
@@ -2564,7 +2596,8 @@ def _defaults():
     return {
         "extract": {"workspace": None, "slides": None},
         "scan": {"scan_compounds": False, "slides": None},
-        "translate": {"retranslate": False, "dict_file": None, "slides": None},
+        "translate": {"retranslate": False, "dict_file": None, "slides": None,
+                      "translate_model": TRANSLATE_MODEL_DEFAULT, "translate_device": "auto"},
         "synthesize": {
             "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/", "slides": None,
             "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
@@ -2578,8 +2611,8 @@ def _defaults():
         },
         "pack": {
             "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "qwen3",
-            "qwen3_model_size": "1.7B", "slides": None, "writeback_notes": False,
-            "slide_pause": 1.0, "keep_audio_icon": False,
+            "qwen3_model_size": "1.7B", "target": None, "slides": None, "update": False,
+            "forceupdate": False, "slide_pause": 1.0, "keep_audio_icon": False,
             "remove_recorded": "all",
         },
     }
@@ -2714,6 +2747,11 @@ def main(argv=None):
         parser.print_help()
         raise SystemExit(1)
     args = parser.parse_args(argv)
+    # "pack text" with the deck taken from the previous run: the one positional
+    # given is the target, not the input.
+    if (args.command == "pack" and args.target is None and args.input in PACK_TARGETS
+            and not os.path.exists(args.input)):
+        args.target, args.input = args.input, None
     command = args.command
     effective = _merge_effective(command, args, config, parser)
 
@@ -2853,7 +2891,8 @@ def main(argv=None):
                                 effective.get("slides"), parser)
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         if not step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
-                                    dictionary=dictionaries, overwrite=effective["retranslate"]):
+                                    dictionary=dictionaries, overwrite=effective["retranslate"],
+                                    model=effective["translate_model"], device=effective["translate_device"]):
             parser.error(f"no {effective['in_lang']} text was found in "
                          f"{os.path.basename(original_file_input or input_path)}")
     elif command == "synthesize":
@@ -2903,9 +2942,10 @@ def main(argv=None):
         prs = Presentation(input_path)
         slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
         model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        targets = resolve_targets(effective.get("target"))
         audio_paths = [os.path.join(workspace_dir, audio_filename(s, effective["in_lang"], model_label))
                        for s in slides]
-        if not any(os.path.exists(p) for p in audio_paths):
+        if "audio" in targets and not any(os.path.exists(p) for p in audio_paths):
             available = _audio_model_labels(workspace_dir, effective["in_lang"])
             suffix = f" Available model labels: {', '.join(available)}." if available else " No matching audio files exist."
             parser.error(f"pack found no {effective['in_lang']} audio for model '{model_label}'."
@@ -2913,7 +2953,8 @@ def main(argv=None):
         output = os.path.abspath(effective["out"])
         # pack uses the narration language as its input-data language.
         step_pack_pptx(input_path, output, workspace_dir, slides, effective["in_lang"], model_label,
-                       source_lang="auto", writeback_notes=effective["writeback_notes"],
+                       source_lang="auto", targets=targets, update=effective.get("update", False),
+                       forceupdate=effective.get("forceupdate", False),
                        remove_recorded=RECORDED_CHOICES[effective["remove_recorded"]],
                        icon_outside=not effective["keep_audio_icon"],
                        pause_ms=int(round(effective["slide_pause"] * 1000)))
@@ -3012,12 +3053,6 @@ def _prepare_file_workspace(command, input_path, in_lang=None):
         manifest = os.path.join(os.path.dirname(input_path), TRANSLATION_MANIFEST)
         if os.path.exists(manifest):
             shutil.copy2(manifest, os.path.join(tmp, TRANSLATION_MANIFEST))
-    elif command == "synthesize":
-        # record_audio_source() rewrites the whole manifest; without the existing
-        # one here, syncing it back would wipe out every other slide's record.
-        manifest = os.path.join(os.path.dirname(input_path), AUDIO_MANIFEST)
-        if os.path.exists(manifest):
-            shutil.copy2(manifest, os.path.join(tmp, AUDIO_MANIFEST))
     return tmp
 
 

@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "python-pptx>=0.6.21",
-    "deep-translator>=1.11.4",
+    "transformers>=4.51.0",
     "pydub>=0.25.1",
     "nltk>=3.8.1",
     "requests>=2.31.0",
