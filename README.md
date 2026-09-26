@@ -262,6 +262,7 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 - Machine translation should be reviewed before synthesis; a term given to the model as an instruction can still be rendered otherwise.
 - Writing the notes and embedding the audio edit the slide XML directly and rely on python-pptx, including one of its internal functions; a change in python-pptx or in the file format may require changes to the tool.
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
+- The tool is designed not to overwrite or delete anything the user has made unless asked, and it never changes the input deck; still, as with any software that edits files, keep a copy of the decks and workspaces you cannot afford to lose.
 
 ## Checking the ASR screening
 
