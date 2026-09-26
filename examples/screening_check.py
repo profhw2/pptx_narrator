@@ -9,7 +9,7 @@ engine skips a phrase, or replaced by other words, as when it misreads a term --
 reports how often the check notices, as a function of the size of the error and the
 length of the note.
 
-    python examples/screening_check.py --workspace ws --in-lang ja \
+    python examples/screening_check.py ws --lang ja \
         --asr-model small --asr-device cuda
 
 If the workspace already holds a verification report, its transcripts are reused and no
@@ -63,13 +63,15 @@ def transcripts_from_report(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--workspace", required=True)
-    ap.add_argument("--in-lang", "--in_lang", dest="in_lang", default="ja")
+    ap.add_argument("workspace", metavar="WS", help="Workspace holding the texts and the audio")
+    ap.add_argument("--lang", "--in-lang", "--in_lang", dest="in_lang", default="ja",
+                    help="Language of the narration (default: ja)")
     ap.add_argument("--model-label", "--model_label", dest="model_label", default=None)
     ap.add_argument("--report", default=None, help="Verification report to take the transcripts from")
     ap.add_argument("--asr-model", "--asr_model", dest="asr_model", default="small")
     ap.add_argument("--asr-device", "--asr_device", dest="asr_device", default="cpu")
-    ap.add_argument("--threshold", type=float, default=0.85)
+    ap.add_argument("--verify-threshold", "--threshold", dest="threshold", type=float, default=0.85,
+                    help="Similarity threshold, as in verify (default: 0.85)")
     ap.add_argument("--sizes", default="3,6,12,25,50,100", help="Error sizes in characters")
     ap.add_argument("--repeats", type=int, default=20, help="Random positions per slide and size")
     ap.add_argument("--seed", type=int, default=1)

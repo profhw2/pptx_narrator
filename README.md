@@ -92,18 +92,20 @@ Translation is optional. A translated text is written next to the text it came f
 ```bash
 # 1. Extract the notes (language identified automatically)
 pptx-narrator ws extract lecture.pptx
-# 2. Translate; terms_ja_de.csv (optional) lists terms and how to translate them
-pptx-narrator ws translate --in-lang ja --out-lang de --dict-file terms_ja_de.csv
-# 3. Review and correct ws/slide_N_de.txt; collect candidate readings from the German text
-pptx-narrator ws scan readings_de.csv --lang de
-# 4. Review readings_de.csv, then synthesize, verify and pack (repeat as needed)
-pptx-narrator ws synthesize --lang de --dict-file readings_de.csv \
+# 2. Translate; terms_ja_en.csv (optional) lists terms and how to translate them
+pptx-narrator ws translate --in-lang ja --out-lang en --dict-file terms_ja_en.csv
+# 3. Review and correct ws/slide_N_en.txt; collect candidate readings from the English text
+pptx-narrator ws scan readings_en.csv --lang en
+# 4. Review readings_en.csv, then synthesize, verify and pack (repeat as needed)
+pptx-narrator ws synthesize --lang en --dict-file readings_en.csv \
   --engine qwen3 --ref-wav my_voice.wav --ref-text my_voice.txt
-pptx-narrator ws verify --lang de --engine qwen3
-pptx-narrator ws pack lecture.pptx lecture_de.pptx --lang de --engine qwen3
+pptx-narrator ws verify --lang en --engine qwen3
+pptx-narrator ws pack lecture.pptx lecture_en.pptx --lang en --engine qwen3
 ```
 
 Each note is given to the translation model whole, so every sentence is translated in the context of the note. The note is passed unchanged; the entries of the translation dictionary that occur in it are given to the model as instructions ("translate X as Y"). An existing translation is kept: `--update` translates again only where the source text has changed since (a translation edited by hand is still kept), and `--overwrite` translates again every selected slide.
+
+`examples/` has the dictionaries of this example (`terms_ja_en.csv`, `readings_en.csv`) and, for another target language, German ones (`terms_ja_de.csv`, `readings_de.csv`); any language of the TTS engine is handled in the same way.
 
 Once written, a translated text is a note text like any other: review and correct it before synthesis. Machine translation, including by language models, makes mistakes that read fluently — a technical term rendered as a similar-sounding word, a sentence whose meaning is reversed, a detail left out.
 
@@ -149,7 +151,7 @@ mRNA,メッセンジャーアールエヌエー,
 Gbp,ギガベースペア,unit
 ```
 
-- With `translate`, the entries that occur in a note are given to the model as instructions (e.g. `塩基対,Basenpaare`: translate 塩基対 as Basenpaare); the note itself is passed unchanged. With `synthesize`, the entries replace strings in the narration text before synthesis (readings). The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
+- With `translate`, the entries that occur in a note are given to the model as instructions (e.g. `塩基対,base pairs`: translate 塩基対 as base pairs); the note itself is passed unchanged. With `synthesize`, the entries replace strings in the narration text before synthesis (readings). The note files themselves are not changed; the rewritten narration is saved as `*.spoken.txt`.
 - Longer strings are replaced first; alphanumeric strings only match on word boundaries; rows with an empty replacement are ignored.
 - `type` = `unit` marks unit symbols that follow a number (`3 Gbp`). For Japanese narration, built-in rules additionally read SI-prefixed units.
 - `--dict-file` can be given several times (e.g. a shared and a deck-specific file); later files take precedence.
@@ -165,7 +167,7 @@ Audio is embedded in the same structure PowerPoint uses for recorded narration: 
 
 A slide plays one audio. When the workspace holds audio of several languages, `--lang` chooses it; when it holds none of the chosen language, `pack` says so and writes the texts only (a slide can then be recorded in PowerPoint). If a text was edited after its audio was made, `pack` warns that the audio does not say the text.
 
-Data recorded together with the old audio is also removed from a narrated slide, because its timing belongs to that audio: the laser-pointer path (`p14:laserTraceLst`) and the recorded play/pause/seek events (`p14:showEvtLst`). `--remove-recorded pointer|events|none` narrows or disables this (default: `all`). Ink annotations are kept and reported. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
+Data recorded together with the old audio is also removed from a narrated slide, because its timing belongs to that audio: the laser-pointer path (`p14:laserTraceLst`) and the recorded play/pause/seek events (`p14:showEvtLst`). `--remove-recorded pointer|events|none` narrows or disables this (default: `all`). Ink annotations are kept and reported: ink drawn during a recording cannot be told apart from ink drawn while editing, which belongs to the slide, so the present version removes neither. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
 
 The texts of the workspace are written into the notes. Without `--lang`, every language the workspace has for a slide is written; with `--lang`, only that one. For each language, `pack` compares the text of the workspace with that part of the note in the deck and with what `extract` read or `pack` last wrote:
 
@@ -251,7 +253,7 @@ fill in a later command.
 
 ### Verification report
 
-The step writes two files. `verify_differences_<lang>.<model>.csv` lists every place where the narration and the transcript disagree, longest first: the slide, the length, the position, what the text said, what the ASR heard, and a few characters of context on each side. This is the list to read: it says where to listen, often what happened, and it can be sorted or filtered as you like; `--min-difference` sets how short a difference is still listed (default 4 characters). `verify_report_<lang>.<model>.csv` summarizes the same comparison per slide, worst first, and marks a slide `FLAGGED` when its similarity falls below `--verify-threshold` or when one stretch of disagreement is longer than `--max-difference` characters (default 40): the first catches a small error in a short note, the second a dropped phrase in a note of any length. Neither is a pass/fail test; many low-scoring slides sound natural and only reflect recognition errors. The report lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `ENGLISH` when Latin-script words remain in Japanese narration), `differences` and `longest_difference` (how many places differ and how long the longest stretch is, which is what distinguishes a skipped phrase from scattered recognition differences), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
+The step writes two files. `verify_differences_<lang>.<model>.csv` lists every place where the narration and the transcript disagree, longest first: the slide, the length, the position, what the text said, what the ASR heard, and a few characters of context on each side. This is the list to read: it says where to listen, often what happened, and it can be sorted or filtered as you like; `--min-difference` sets how short a difference is still listed (default 4 characters). `verify_report_<lang>.<model>.csv` summarizes the same comparison per slide, worst first, and marks a slide `FLAGGED` when its similarity falls below `--verify-threshold` or when one stretch of disagreement is longer than `--max-difference` characters (default 40): the first catches a small error in a short note, the second a dropped phrase in a note of any length. Neither is a pass/fail test; many low-scoring slides sound natural and only reflect recognition errors. The report lists, worst first: `slide`, `similarity` (difflib ratio, 0–1), `cer` (Levenshtein distance / length of the intended sequence), `status` (`OK`, `FLAGGED`, or `LATIN` when Latin-script words remain in Japanese narration, which the kana comparison cannot score), `differences` and `longest_difference` (how many places differ and how long the longest stretch is, which is what distinguishes a skipped phrase from scattered recognition differences), the intended and recognized text, and the two normalized sequences that were compared (katakana for Japanese; case-folded text without punctuation or spaces otherwise).
 
 ## Limitations
 
@@ -266,10 +268,22 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 `examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the sequence the check compares (katakana for Japanese, normalized text otherwise) -- a run of characters deleted, as when a phrase is skipped, or replaced by other characters, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note. Sizes are in characters of that sequence, so 3 characters is about one short term and 50 is about one sentence:
 
 ```bash
-python examples/screening_check.py --workspace ws --in-lang ja --asr-model small --asr-device cuda
+python examples/screening_check.py ws --lang ja --asr-model small --asr-device cuda
 ```
 
 The workspace is not modified; `--sizes` and `--repeats` set the error sizes in characters and the number of random positions per slide and size. The result says for which note lengths a given error is large enough to cross the threshold, which is what the threshold has to be chosen against. If faster-whisper cannot load the CUDA libraries (`libcublas.so.12 is not found`), use `--asr-device cpu` or install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.
+
+### Tuning the check
+
+How well the check works depends on the TTS engine, the ASR model and the material, so its criteria are options of `verify`, to be chosen on one's own decks:
+
+- `--verify-threshold` (default 0.85) looks at the share of the slide that agrees with the transcript (similarity) and flags a slide below it. It works on short notes, where even a small error lowers the share noticeably, but in a long note an error is diluted and almost never lowers it enough: on a test deck, an error of 25 characters was caught in 180 of 200 trials on notes below 200 characters and in none of 480 on notes above 600.
+- `--max-difference` (default 40 characters; `0` disables it) looks at the longest single stretch of disagreement and flags a slide above it. It catches a dropped, repeated or invented phrase whatever the length of the note, and so covers the long notes that the similarity misses; the two are used together, and a slide is flagged if either applies. A value just above the longest stretch found on correct slides flags such errors without flagging correct slides.
+- `--cer-threshold` (default: not used) looks at the character error rate (the character edits that turn the transcript into the text, divided by the length of the text). Being a share as well, it is diluted in long notes in the same way.
+- `--min-difference` (default 4 characters) does not change which slides are flagged; it is the shortest difference listed in `verify_differences_*.csv`, so that small differences in how the ASR writes a word are left out of the list.
+- `--asr-model` (default `small`) chooses the faster-whisper model: a larger one makes fewer recognition errors, and so raises fewer false flags, but takes longer.
+
+`examples/screening_check.py` shows, on a given deck, which errors each setting catches.
 
 ## Tests
 

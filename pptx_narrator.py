@@ -1144,7 +1144,7 @@ class LLMTranslator:
     def translate(self, text, source, target, glossary=None):
         import torch
         self._load()
-        system = (f"You translate the presenter notes of a lecture slide deck from {language_name(source)} "
+        system = (f"You translate the presenter notes of a slide deck from {language_name(source)} "
                   f"into {language_name(target)}. The notes are read aloud as narration. Translate "
                   f"faithfully and completely, without adding or leaving out content, keep the paragraph "
                   f"breaks, and output only the translation.")
@@ -1324,7 +1324,9 @@ def step_generate_audio(
     stats.report()
 
 class SynthesisStats:
-    """Collects synthesis times so that a run reports its cost (see --tts)."""
+    """Collects synthesis times so that a run reports its cost. Every ratio it reports is the
+    synthesis time divided by the duration of the audio (2.0: synthesis took twice as long as
+    the audio lasts)."""
 
     def __init__(self, engine, device):
         self.engine, self.device = engine, device
@@ -1336,15 +1338,15 @@ class SynthesisStats:
         self.slides += 1
         self.seconds += seconds
         self.audio_seconds += audio_ms / 1000.0
-        logger.info(f"Slide {slide_num}: {audio_ms / 1000.0:.1f} s of audio synthesized in {seconds:.1f} s "
-                    f"({seconds / max(audio_ms / 1000.0, 1e-9):.2f} x audio time).")
+        logger.info(f"Slide #{slide_num}: {audio_ms / 1000.0:.1f} s of audio synthesized in {seconds:.1f} s "
+                    f"(synthesis took {seconds / max(audio_ms / 1000.0, 1e-9):.2f} x the audio duration).")
 
     def report(self):
         if not self.slides:
             return
         logger.info(f"Synthesis summary ({self.engine}, {self.device}): {self.slides} slides, "
                     f"{self.audio_seconds / 60:.1f} min of audio in {self.seconds / 60:.1f} min "
-                    f"({self.audio_seconds / max(self.seconds, 1e-9):.2f} x real time, "
+                    f"(synthesis took {self.seconds / max(self.audio_seconds, 1e-9):.2f} x the audio duration, "
                     f"{self.seconds / self.slides:.1f} s per slide).")
 
 
@@ -1665,7 +1667,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         long_difference = max_difference is not None and worst_run > max_difference
         failed = (score < threshold or long_difference
                   or (cer_threshold is not None and cer > cer_threshold))
-        status = "ENGLISH" if has_latin else ("FLAGGED" if failed else "OK")
+        status = "LATIN" if has_latin else ("FLAGGED" if failed else "OK")
 
         results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
                         intended_text, asr_text, norm_intended, norm_asr))
@@ -1694,7 +1696,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
             w.writerow(row)
 
     n_flagged = sum(1 for r in results if r[3] == "FLAGGED")
-    n_latin = sum(1 for r in results if r[3] == "ENGLISH")
+    n_latin = sum(1 for r in results if r[3] == "LATIN")
     criterion = f"similarity < {threshold}"
     if max_difference is not None:
         criterion += f", a difference longer than {max_difference} characters"
@@ -2292,8 +2294,10 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
     for what in removed:
         logger.info(f"Slide #{s_num}: removed the {what} of the previous recording.")
     if "<p:contentPart" in slide_xml:
-        logger.warning(f"Slide #{s_num}: the slide contains ink annotations; they are kept and may no longer "
-                       "match the new narration.")
+        # Ink drawn during a recording cannot be told apart from ink drawn while editing, which
+        # belongs to the slide, so neither is removed.
+        logger.warning(f"Slide #{s_num}: the slide contains ink annotations; they are kept (ink of a recording "
+                       "cannot be told apart from ink drawn on the slide) and may no longer match the new narration.")
 
     media_dir = os.path.join(pkg_dir, "ppt", "media")
     os.makedirs(media_dir, exist_ok=True)
