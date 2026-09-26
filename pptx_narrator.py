@@ -11,6 +11,7 @@ import unicodedata
 from collections import Counter
 import difflib
 import hashlib
+import shlex
 import sys
 import time
 import shutil
@@ -273,6 +274,128 @@ def parse_structured_note(text):
     return info
 
 
+# ------------------------------------------
+# Notes holding texts of several languages
+# ------------------------------------------
+# When the texts of several languages are written into one note, each is preceded by
+# a heading of the same form; no language is treated specially:
+#
+#   === pptx-narrator: [ja] ===
+#   <Japanese text>
+#
+#   === pptx-narrator: [en] translated from [ja] 2026-09-25T14:02 #3f2a9c0d1e; edited 2026-09-26T10:15 ===
+#   <English text>
+#
+# "translated from" is given when the text was made by translate (the hash identifies
+# the version of the source it was made from); "edited" when it was changed after it was
+# made. A note of one language has no heading. The earlier layout (narration/source) is
+# still read.
+_SECTION_MARK_RE = re.compile(r"^[ \t]*=+[ \t]*pptx-narrator:[ \t]*\[([^\]\n]+)\]([^\n]*?)[ \t]*=+[ \t]*$")
+_FROM_RE = re.compile(r"translated from \[([^\]\n]+)\](?:[ \t]+(\d{4}-\d\d-\d\d\S*))?(?:[ \t]+#([0-9a-fA-F]{6,40}))?")
+_EDITED_RE = re.compile(r"edited[ \t]+(\d{4}-\d\d-\d\d\S*)")
+
+
+def _short_time(stamp):
+    """2026-09-25T14:02:33+0900 -> 2026-09-25T14:02 (local time, to the minute)."""
+    return stamp[:16] if stamp else ""
+
+
+def section_heading(lang, info=None):
+    info = info or {}
+    text = f"=== pptx-narrator: [{lang}]"
+    if info.get("source_lang"):
+        text += f" translated from [{info['source_lang']}]"
+        if info.get("translated_at"):
+            text += " " + _short_time(info["translated_at"])
+        if info.get("source_fingerprint"):
+            text += f" #{info['source_fingerprint']}"
+    if info.get("edited_at"):
+        text += ("; " if info.get("source_lang") else " ") + f"edited {_short_time(info['edited_at'])}"
+    return text + " ==="
+
+
+def _heading_of(line):
+    """(lang, info) if a line is a section heading (either layout), else None."""
+    m = _SECTION_MARK_RE.match(line)
+    if m and not m.group(1).startswith(("narration", "source")):
+        rest, info = m.group(2), {}
+        f = _FROM_RE.search(rest)
+        if f:
+            info.update(source_lang=normalize_lang(f.group(1)), translated_at=f.group(2) or "",
+                        source_fingerprint=(f.group(3) or "").lower())
+        e = _EDITED_RE.search(rest)
+        if e:
+            info["edited_at"] = e.group(1)
+        return normalize_lang(m.group(1)), info
+    m = _NARRATION_MARK_RE.match(line)
+    if m and m.group(4):
+        return None, {"spoken": True}
+    if m:
+        return normalize_lang(m.group(1)), {"source_lang": normalize_lang(m.group(2)),
+                                            "source_fingerprint": m.group(3).lower(), "translated_at": ""}
+    m = _SOURCE_MARK_RE.match(line)
+    if m:
+        return normalize_lang(m.group(1)), {}
+    return None
+
+
+def split_note_sections(lines):
+    """Divide the lines of a note into [{"lang", "info", "lines"}]; a part before the first
+    heading (or a note without headings) has lang None."""
+    sections, cur = [], None
+    for line in lines:
+        h = _heading_of(line)
+        if h is not None:
+            cur = {"lang": h[0], "info": h[1], "lines": []}
+            sections.append(cur)
+            continue
+        if cur is None:
+            cur = {"lang": None, "info": {}, "lines": []}
+            sections.append(cur)
+        cur["lines"].append(line)
+    return sections
+
+
+def _section_text(lines):
+    return "\n".join(lines).strip()
+
+
+def _paragraph_text(p):
+    """The text of one a:p, leaving out struck-through runs (see _text_frame_text)."""
+    parts = []
+    for child in p:
+        if child.tag == _A_NS + "r":
+            if _is_struck(child):
+                continue
+            t = child.find(_A_NS + "t")
+            parts.append((t.text or "") if t is not None else "")
+        elif child.tag == _A_NS + "fld":
+            t = child.find(_A_NS + "t")
+            parts.append((t.text or "") if t is not None else "")
+        elif child.tag == _A_NS + "br":
+            parts.append("\v")
+    return "".join(parts)
+
+
+def _new_paragraphs(text):
+    """Plain a:p elements for a text (one per line; \\v is a line break)."""
+    from pptx.oxml.xmlchemy import OxmlElement
+    out = []
+    for line in text.split("\n"):
+        p = OxmlElement("a:p")
+        for k, seg in enumerate(line.split("\v")):
+            if k:
+                p.append(OxmlElement("a:br"))
+            if seg:
+                r = OxmlElement("a:r")
+                t = OxmlElement("a:t")
+                t.text = seg
+                r.append(t)
+                p.append(r)
+        out.append(p)
+    return out
+
+
 def _load_manifest(workspace_dir):
     path = os.path.join(workspace_dir, TRANSLATION_MANIFEST)
     if os.path.exists(path):
@@ -284,11 +407,15 @@ def _load_manifest(workspace_dir):
     return {}
 
 
-def record_translation(workspace_dir, slide_num, target_lang, source_lang, source_text):
-    """Remember which version of the source note a translation was made from."""
+def record_translation(workspace_dir, slide_num, target_lang, source_lang, source_text, text=None):
+    """Remember which version of the source note a translation was made from, and the
+    translation as written, so that an edit of either can be told apart later."""
     manifest = _load_manifest(workspace_dir)
-    manifest.setdefault(str(slide_num), {})[target_lang] = {
-        "source_lang": source_lang, "source_fingerprint": text_fingerprint(source_text)}
+    entry = {"source_lang": source_lang, "source_fingerprint": text_fingerprint(source_text),
+             "translated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if text is not None:
+        entry["fingerprint"] = text_fingerprint(text)
+    manifest.setdefault(str(slide_num), {})[target_lang] = entry
     with open(os.path.join(workspace_dir, TRANSLATION_MANIFEST), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
 
@@ -299,7 +426,7 @@ def record_translation(workspace_dir, slide_num, target_lang, source_lang, sourc
 # extract records the fingerprint of each slide's note as it read it, and pack
 # records the fingerprint of any note it writes. A note whose fingerprint is
 # neither was edited in the deck by hand since, and pack does not overwrite it
-# unless --forceupdate is given.
+# unless --overwrite is given.
 NOTE_BASELINE = "note_baseline.json"
 PACK_TARGETS = ("all", "audio", "text")
 
@@ -797,11 +924,51 @@ def apply_dictionary(text, entries, lang, letter_map=None, builtin_units=True):
 # ==========================================
 # Pipeline Steps
 # ==========================================
-def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="auto"):
+def _text_langs_of_slide(workspace_dir, s_num):
+    """Languages of the texts of one slide in the workspace, in language-code order."""
+    langs = []
+    for name in os.listdir(workspace_dir):
+        m = _TEXT_FILE_RE.match(name)
+        if m and int(m.group(1)) == s_num:
+            langs.append(normalize_lang(m.group(2)) if m.group(2) else "ja")
+    return sorted(langs, key=lang_suffix)
+
+
+def _made_record(workspace_dir, s_num, lang, manifest, baseline):
+    """How a text of the workspace was made: (heading info, fingerprint when made)."""
+    rec = manifest.get(str(s_num), {}).get(lang) or {}
+    made = (baseline.get(str(s_num), {}).get("langs") or {}).get(lang) or {}
+    info = {}
+    if rec.get("source_lang"):
+        info.update(source_lang=rec["source_lang"], translated_at=rec.get("translated_at", ""),
+                    source_fingerprint=rec.get("source_fingerprint", ""))
+        return info, rec.get("fingerprint"), rec.get("edited_at") or ("?" if rec.get("edited") else "")
+    return info, made.get("extracted"), made.get("edited_at", "")
+
+
+def _section_info(workspace_dir, s_num, lang, text, manifest, baseline):
+    """What the heading of a text says: how it was made, and when it was edited since."""
+    info, made_fp, edited_at = _made_record(workspace_dir, s_num, lang, manifest, baseline)
+    path = os.path.join(workspace_dir, text_filename(s_num, lang))
+    if made_fp and made_fp != text_fingerprint(text) and os.path.exists(path):
+        edited_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(os.path.getmtime(path)))
+    if edited_at and edited_at != "?":
+        info["edited_at"] = edited_at
+    return info
+
+
+def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="auto",
+                       update=False, overwrite=False):
+    """Write the note of each slide into the workspace, one text per language.
+
+    A note with texts of several languages gives one text per language. A text already in
+    the workspace is replaced only with update (when it was not edited in the workspace
+    since it was written) or overwrite. Returns the number of texts found in the deck.
+    """
     logger.info("--- [Option: Extract] Extracting Notes ---")
     prs = Presentation(pptx_path)
-    plain, structured = {}, {}
-    raw_fingerprints, extracted = {}, []
+    plain, headed = {}, {}
+    raw_fingerprints = {}
     for slide_num in requested_slides:
         if slide_num > len(prs.slides): continue
         slide = prs.slides[slide_num - 1]
@@ -817,19 +984,21 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                         + ", ".join(repr(t) for t in struck[:5]) + (" ..." if len(struck) > 5 else ""))
         raw_fingerprints[slide_num] = text_fingerprint(raw_text)
 
-        clean_text = raw_text.replace('​', '').replace('‌', '').replace('‍', '')
+        clean_text = raw_text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
         txt = re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
         if not txt:
             logger.info(f"Slide #{slide_num} has no notes (skipped)")
             continue
-        info = parse_structured_note(txt)
-        if info and info["source_text"]:
-            structured[slide_num] = info
+        parts = [dict(s, text=_section_text(s["lines"])) for s in split_note_sections(txt.split("\n"))
+                 if s["lang"]]
+        parts = [s for s in parts if s["text"]]
+        if parts:
+            headed[slide_num] = parts
         else:
             plain[slide_num] = txt
 
     if source_lang == "auto":
-        languages = detect_note_languages(plain, known={n: i["source_lang"] for n, i in structured.items()})
+        languages = detect_note_languages(plain, known={n: p[0]["lang"] for n, p in headed.items()})
     else:
         # An explicit language is a selector. Do not relabel a note merely because
         # the caller requested a language; retain only notes whose detected language
@@ -844,61 +1013,78 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                 continue
             languages[n] = source_lang
 
-    written = 0
-    for slide_num, txt in plain.items():
-        if slide_num not in languages:
-            continue
-        name = text_filename(slide_num, languages[slide_num])
-        with open(os.path.join(workspace_dir, name), "w", encoding="utf-8") as f:
-            f.write(txt)
-        written += 1
-        extracted.append(slide_num)
-        logger.info(f"Slide #{slide_num}: note extracted to {name} (language: {languages[slide_num]}).")
+    items = [(n, languages[n], txt, {}) for n, txt in plain.items() if n in languages]
+    for n, parts in headed.items():
+        for part in parts:
+            if source_lang != "auto" and base_lang(part["lang"]) != base_lang(source_lang):
+                logger.info(f"Slide #{n}: the {part['lang']} part of the note is not the requested "
+                            f"'{source_lang}' (skipped)")
+                continue
+            items.append((n, part["lang"], part["text"], part["info"]))
+    items.sort(key=lambda it: (it[0], lang_suffix(it[1])))
 
-    for slide_num, info in structured.items():
-        if source_lang != "auto" and base_lang(info["source_lang"]) != base_lang(source_lang):
-            logger.info(f"Slide #{slide_num}: structured note source is '{info['source_lang']}', not requested '{source_lang}' (skipped)")
-            continue
-        src_lang = info["source_lang"] if source_lang == "auto" else source_lang
-        languages[slide_num] = src_lang
-        src_name = text_filename(slide_num, src_lang)
-        with open(os.path.join(workspace_dir, src_name), "w", encoding="utf-8") as f:
-            f.write(info["source_text"])
-        written += 1
-        extracted.append(slide_num)
-        logger.info(f"Slide #{slide_num}: structured note; source part extracted to {src_name} (language: {src_lang}).")
-
-        narr_lang = info["narration_lang"]
-        if not narr_lang or not info["narration_text"] or info["spoken"] or lang_suffix(narr_lang) == lang_suffix(src_lang):
-            continue
-        tgt_path = os.path.join(workspace_dir, text_filename(slide_num, narr_lang))
-        if info["fingerprint"] == text_fingerprint(info["source_text"]):
-            with open(tgt_path, "w", encoding="utf-8") as f:
-                f.write(info["narration_text"])
-            record_translation(workspace_dir, slide_num, narr_lang, src_lang, info["source_text"])
-            logger.info(f"Slide #{slide_num}: existing {narr_lang} narration restored to {os.path.basename(tgt_path)}.")
+    baseline = _load_note_baseline(workspace_dir)
+    manifest = _load_manifest(workspace_dir)
+    found, kept, translations_read = 0, [], False
+    for n, lang, text, info in items:
+        found += 1
+        name = text_filename(n, lang)
+        path = os.path.join(workspace_dir, name)
+        new_fp = text_fingerprint(text)
+        entry = baseline.setdefault(str(n), {})
+        rec = (entry.get("langs") or {}).get(lang) or {}
+        if os.path.exists(path) and text_fingerprint(_read_text(path)) != new_fp:
+            cur_fp = text_fingerprint(_read_text(path))
+            known = {rec.get("extracted"), rec.get("packed")} - {None}
+            if n in plain:
+                known |= {entry.get("extracted"), entry.get("packed")} - {None}
+            unedited = cur_fp in known
+            if not (overwrite or (update and unedited)):
+                kept.append(n)
+                if unedited:
+                    logger.warning(f"Slide #{n}: the note in the deck has changed since {name} was written; "
+                                   f"{name} is kept (add --update to take the note in again, or --overwrite).")
+                else:
+                    logger.warning(f"Slide #{n}: {name} differs from the note in the deck and was edited in the "
+                                   f"workspace (or has no record of being written); it is kept "
+                                   f"(add --overwrite to replace it with the note).")
+                continue
+            logger.info(f"Slide #{n}: {name} replaced with the note in the deck "
+                        f"({'--overwrite' if overwrite else '--update'}).")
+        elif os.path.exists(path):
+            logger.info(f"Slide #{n}: {name} is already the same as the note ({lang}).")
         else:
-            stale_path = os.path.join(workspace_dir, f"slide_{slide_num}{lang_suffix(narr_lang)}.stale.txt")
-            if os.path.exists(tgt_path):
-                os.remove(tgt_path)
-            with open(stale_path, "w", encoding="utf-8") as f:
-                f.write(info["narration_text"])
-            logger.warning(f"Slide #{slide_num}: the source note was edited after the {narr_lang} narration was "
-                           f"translated; it will be translated again by --translate "
-                           f"(previous narration kept in {os.path.basename(stale_path)}).")
+            logger.info(f"Slide #{n}: note extracted to {name} (language: {lang}).")
+        if not (os.path.exists(path) and text_fingerprint(_read_text(path)) == new_fp):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        made = {"extracted": new_fp}
+        if info.get("edited_at"):
+            made["edited_at"] = info["edited_at"]
+        entry.setdefault("langs", {})[lang] = made
+        entry["extracted"] = raw_fingerprints[n]
+        if info.get("source_lang"):
+            translations_read = True
+            edited = bool(info.get("edited_at"))
+            manifest.setdefault(str(n), {})[lang] = {
+                "source_lang": info["source_lang"], "source_fingerprint": info.get("source_fingerprint", ""),
+                "translated_at": info.get("translated_at", ""), "fingerprint": None if edited else new_fp,
+                "edited": edited, "edited_at": info.get("edited_at", "")}
+            logger.info(f"Slide #{n}: {name} was translated from {info['source_lang']}"
+                        + (" and edited since" if edited else "") + " (from the heading in the note).")
 
-    if source_lang == "auto" and languages:
-        summary = Counter(languages.values()).most_common()
-        logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in summary))
-
-    # Record the notes as read, for pack's hand-edit check. Slides not extracted
-    # in this run keep their earlier record.
-    if extracted:
-        baseline = _load_note_baseline(workspace_dir)
-        baseline.update({str(n): {"extracted": raw_fingerprints[n]} for n in extracted})
+    if items and baseline != _load_note_baseline(workspace_dir):
         _save_note_baseline(workspace_dir, baseline)
-
-    return written
+    if translations_read:
+        with open(os.path.join(workspace_dir, TRANSLATION_MANIFEST), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
+    counts = Counter(lang for _, lang, _, _ in items)
+    if counts:
+        logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in counts.most_common()))
+    if kept:
+        logger.warning("Texts kept although the note differs, on slide(s): "
+                       + ", ".join(map(str, sorted(set(kept)))) + ".")
+    return found
 
 # ------------------------------------------
 # Translation
@@ -981,15 +1167,20 @@ def glossary_for(text, dictionary):
 
 
 def step_translate_notes(workspace_dir, requested_slides, source_lang, target_lang,
-                         dictionary=None, overwrite=False, model=TRANSLATE_MODEL_DEFAULT, device="auto"):
+                         dictionary=None, overwrite=False, update=False, model=TRANSLATE_MODEL_DEFAULT,
+                         device="auto"):
+    """Translate the selected slides; an existing translation is kept unless asked otherwise.
+
+    update: translate again where the source text has changed since the translation
+            was made, unless the translation was edited since (that edit is kept).
+    overwrite: translate again every selected slide.
+    """
     logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' with {model} ---")
     translator = None
     sources_found = 0
+    manifest = _load_manifest(workspace_dir)
     for slide_num in requested_slides:
         tgt_p = os.path.join(workspace_dir, text_filename(slide_num, target_lang))
-        if not overwrite and os.path.exists(tgt_p) and os.path.getsize(tgt_p) > 0:
-            sources_found += 1
-            continue
         src_lang, src_p = find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=target_lang)
         if src_p is None:
             continue
@@ -997,7 +1188,29 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
         with open(src_p, "r", encoding="utf-8") as f:
             text = f.read().strip()
         if not text:
+            logger.warning(f"Slide #{slide_num}: {os.path.basename(src_p)} is empty; nothing to translate.")
             continue
+        existing = _read_text(tgt_p)
+        if existing and not overwrite:
+            record = (manifest.get(str(slide_num), {}).get(target_lang) or {})
+            source_changed = record.get("source_fingerprint") != text_fingerprint(text)
+            edited = bool(record.get("edited")) or record.get("fingerprint") not in (None, text_fingerprint(existing))
+            name = os.path.basename(tgt_p)
+            if not record:
+                logger.warning(f"Slide #{slide_num}: {name} already exists and has no record of being "
+                               f"translated from {os.path.basename(src_p)}; kept (add --overwrite to replace it).")
+                continue
+            if not source_changed:
+                logger.info(f"Slide #{slide_num}: {name} is up to date with its source; kept.")
+                continue
+            if not update:
+                logger.warning(f"Slide #{slide_num}: {name} already exists and its source has changed "
+                               f"since; kept (add --update to translate it again, or --overwrite).")
+                continue
+            if edited:
+                logger.warning(f"Slide #{slide_num}: the source of {name} has changed, but {name} was "
+                               f"edited after it was translated; kept (add --overwrite to replace it).")
+                continue
         if translator is None:
             translator = make_translator(model, device)
         glossary = glossary_for(text, dictionary)
@@ -1012,7 +1225,7 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
             continue
         with open(tgt_p, "w", encoding="utf-8") as out_f:
             out_f.write(translated.strip() + "\n")
-        record_translation(workspace_dir, slide_num, target_lang, src_lang, text)
+        record_translation(workspace_dir, slide_num, target_lang, src_lang, text, text=translated)
         logger.info(f"Slide #{slide_num}: translated {src_lang} -> {target_lang} "
                     f"({time.time() - t0:.1f}s{', %d dictionary term(s)' % len(glossary) if glossary else ''}).")
     return sources_found
@@ -1515,23 +1728,6 @@ def _read_text(path):
 RECORDED_CHOICES = {"all": ("pointer", "events"), "pointer": ("pointer",), "events": ("events",), "none": ()}
 
 
-def _narration_note(workspace_dir, s_num, lang, source_lang, manifest):
-    """The note pack writes for a slide: the text the audio was synthesized from, with
-    the note it was translated from when there is one. None if there is no such text."""
-    narration = _read_text(os.path.join(workspace_dir, text_filename(s_num, lang)))
-    if not narration:
-        return None
-    src_lang, src_p = find_source_text(workspace_dir, s_num, source_lang, exclude_lang=lang)
-    original = _read_text(src_p) if src_p is not None else ""
-    if original and original != narration:
-        fingerprint = (manifest.get(str(s_num), {}).get(lang) or {}).get("source_fingerprint")
-        if fingerprint and fingerprint != text_fingerprint(original):
-            logger.warning(f"Slide #{s_num}: the {lang} narration was translated from an older version "
-                           f"of the source note (run --translate --retranslate to update it).")
-        return compose_structured_note(lang, narration, src_lang, original, fingerprint=fingerprint)
-    return narration
-
-
 def _slide_audio_matches(pkg_dir, slide_part, audio_path):
     """True if the slide already plays exactly this audio file."""
     slide_p = os.path.join(pkg_dir, *slide_part.split("/"))
@@ -1550,69 +1746,228 @@ def _slide_audio_matches(pkg_dir, slide_part, audio_path):
     return False
 
 
-def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
-                   source_lang="auto", targets=None, update=False, forceupdate=False,
-                   remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
-    """Write the narration audio and/or the text it was synthesized from into the deck.
+def _plain_note_lang(entry, text):
+    """The language of a note without headings: the one extract recorded, else detected."""
+    langs = list((entry.get("langs") or {}).keys())
+    if len(langs) == 1:
+        return langs[0]
+    detected, confident = detect_language(text)
+    return normalize_lang(detected) if confident else None
 
-    targets: subset of {"audio", "text"} (default: both).
-    update: leave out audio and notes that are already the same in the deck.
-    forceupdate: overwrite notes edited in the deck since extract (with a warning).
+
+def _note_sections_xml(body):
+    """The paragraphs of a notes text body, divided into sections by language."""
+    sections, cur = [], None
+    for p in body.findall(_A_NS + "p"):
+        t = _paragraph_text(p)
+        h = _heading_of(t)
+        if h is not None:
+            cur = {"lang": h[0], "info": h[1], "paras": [], "lines": [], "heading": True}
+            sections.append(cur)
+            continue
+        if cur is None:
+            cur = {"lang": None, "info": {}, "paras": [], "lines": [], "heading": False}
+            sections.append(cur)
+        cur["paras"].append(p)
+        cur["lines"].append(t)
+    return sections
+
+
+def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, overwrite, audio_lang):
+    """Write the texts of the workspace into the notes, one section per language.
+
+    For each language, the text of the workspace (Y) is compared with that part of the note
+    in the deck (Z) and with what extract read or pack wrote (X): the same text is not
+    written again; a text edited only in the workspace is written with --update or
+    --overwrite; a note edited in the deck is written over only with --overwrite. A
+    language the note does not have yet is added. Parts that are not written keep their
+    formatting and struck-through text.
     """
-    logger.info("--- [Option: Pack] Rebuilding PPTX ---")
-    targets = set(targets or {"audio", "text"})
-    prs = Presentation(original_pptx)
     manifest = _load_manifest(workspace_dir)
     baseline = _load_note_baseline(workspace_dir)
     notes_written, protected, mismatched = [], [], []
-
     for i, slide in enumerate(prs.slides):
-        s_num = i + 1
-        if s_num not in requested_slides:
+        n = i + 1
+        if n not in requested_slides:
             continue
-        note_text = _narration_note(workspace_dir, s_num, lang, source_lang, manifest)
-        if note_text is None:
+        ws_langs = [l for l in _text_langs_of_slide(workspace_dir, n)
+                    if not lang or lang_suffix(l) == lang_suffix(lang)]
+        if not ws_langs:
+            if lang:
+                logger.info(f"Slide #{n}: no {lang} text in the workspace (note left as is).")
             continue
-        current = _slide_note_raw(slide)
-        differs = text_fingerprint(note_text) != text_fingerprint(current)
-        if not differs:
-            # Already the same; rewriting changes nothing, and --update leaves it out.
-            if "text" in targets and not update:
-                slide.notes_slide.notes_text_frame.text = note_text
+        body = slide.notes_slide.notes_text_frame._txBody
+        sections = _note_sections_xml(body)
+        headed = any(s["heading"] for s in sections)
+        entry = baseline.get(str(n), {})
+        if not headed and sections and _section_text(sections[0]["lines"]):
+            sections[0]["lang"] = _plain_note_lang(entry, _section_text(sections[0]["lines"]))
+        sections = [s for s in sections if s["lang"] or _section_text(s["lines"])]
+        by_lang = {lang_suffix(s["lang"]): s for s in sections if s["lang"]}
+        written, added = [], []
+        for l in ws_langs:
+            name = text_filename(n, l)
+            text = _read_text(os.path.join(workspace_dir, name))
+            if not text:
+                logger.warning(f"Slide #{n}: {name} is empty (not written).")
+                continue
+            y = text_fingerprint(text)
+            rec_tr = manifest.get(str(n), {}).get(l) or {}
+            if rec_tr.get("source_lang"):
+                src_text = _read_text(os.path.join(workspace_dir, text_filename(n, rec_tr["source_lang"])))
+                if src_text and text_fingerprint(src_text) != rec_tr.get("source_fingerprint"):
+                    logger.warning(f"Slide #{n}: {name} was translated from an older version of "
+                                   f"{text_filename(n, rec_tr['source_lang'])} (translate again with --update).")
+            s = by_lang.get(lang_suffix(l))
+            if s is None:
+                if "text" in targets:
+                    added.append({"lang": l, "info": {}, "paras": _new_paragraphs(text), "lines": [text],
+                                  "heading": False, "written": True})
+                    written.append((l, y))
+                    logger.info(f"Slide #{n}: the {l} text ({name}) added to the note.")
+                continue
+            z = text_fingerprint(_section_text(s["lines"]))
+            if z == y:
+                logger.info(f"Slide #{n}: the {l} part of the note is already the same as {name}.")
+                continue
+            if "text" not in targets:
+                mismatched.append(n)
+                if lang_suffix(l) == lang_suffix(audio_lang or ""):
+                    logger.warning(f"Slide #{n}: the note in the deck differs from the text the audio was "
+                                   f"synthesized from ({name}); notes are not written with --data-type audio.")
+                continue
+            rec = (entry.get("langs") or {}).get(l) or {}
+            known = {rec.get("extracted"), rec.get("packed")} - {None}
+            if not headed:
+                known |= {entry.get("extracted"), entry.get("packed")} - {None}
+            if z in known:
+                if not (update or overwrite):
+                    mismatched.append(n)
+                    logger.warning(f"Slide #{n}: {name} was edited in the workspace; the {l} part of the note "
+                                   f"is not replaced (add --update or --overwrite).")
+                    continue
+            else:
+                reason = ("there is no record of extract reading this note, so a hand edit cannot be ruled out"
+                          if not entry else "the note was edited in the deck after extract")
+                if not overwrite:
+                    protected.append(n)
+                    mismatched.append(n)
+                    logger.warning(f"Slide #{n}: {reason}; the {l} part of the note is not overwritten, and it "
+                                   f"differs from {name}. Re-extract after merging the edit, or use --overwrite "
+                                   "to overwrite it.")
+                    continue
+                logger.warning(f"Slide #{n}: {reason}; overwriting it (--overwrite).")
+            s["paras"] = _new_paragraphs(text)
+            s["written"] = True
+            written.append((l, y))
+            logger.info(f"Slide #{n}: the {l} part of the note replaced with {name}.")
+        if not written:
             continue
-
-        if "text" not in targets:
-            mismatched.append(s_num)
-            logger.warning(f"Slide #{s_num}: the note in the deck differs from the text the audio was "
-                           f"synthesized from ({text_filename(s_num, lang)}); notes are not written "
-                           "with target 'audio'.")
-            continue
-
-        entry = baseline.get(str(s_num))
-        if entry is None:
-            reason = "there is no record of extract reading this note, so a hand edit cannot be ruled out"
-        elif not _note_is_known(entry, text_fingerprint(current)):
-            reason = "the note was edited in the deck after extract"
-        else:
-            reason = None
-
-        if reason and not forceupdate:
-            protected.append(s_num)
-            mismatched.append(s_num)
-            logger.warning(f"Slide #{s_num}: {reason}; the note is not overwritten, and it differs from "
-                           f"the text the audio was synthesized from ({text_filename(s_num, lang)}). "
-                           "Re-extract after merging the edit, or use --forceupdate to overwrite it.")
-            continue
-        if reason:
-            logger.warning(f"Slide #{s_num}: {reason}; overwriting it (--forceupdate).")
-
-        slide.notes_slide.notes_text_frame.text = note_text
-        baseline.setdefault(str(s_num), {})["packed"] = text_fingerprint(note_text)
-        notes_written.append(s_num)
-        logger.info(f"Slide #{s_num}: note replaced with {text_filename(s_num, lang)}.")
-
+        final = sections + sorted(added, key=lambda s: lang_suffix(s["lang"]))
+        multi = sum(1 for s in final if s["lang"]) > 1
+        for p in body.findall(_A_NS + "p"):
+            body.remove(p)
+        for k, s in enumerate(final):
+            if multi and s["lang"]:
+                # The heading describes the text under it: the text of the workspace where that
+                # is what the note now holds, otherwise what the note's own heading said.
+                ws_text = _read_text(os.path.join(workspace_dir, text_filename(n, s["lang"])))
+                shown = _section_text(s["lines"]) if not s.get("written") else ws_text
+                if ws_text and text_fingerprint(shown) == text_fingerprint(ws_text):
+                    info = _section_info(workspace_dir, n, s["lang"], ws_text, manifest, baseline)
+                else:
+                    info = s["info"]
+                body.extend(_new_paragraphs(section_heading(s["lang"], info)))
+            body.extend(s["paras"])
+            if multi and k < len(final) - 1:
+                body.extend(_new_paragraphs(""))
+        if body.find(_A_NS + "p") is None:
+            body.extend(_new_paragraphs(""))
+        entry = baseline.setdefault(str(n), {})
+        for l, y in written:
+            entry.setdefault("langs", {}).setdefault(l, {})["packed"] = y
+        entry["packed"] = text_fingerprint(_slide_note_raw(slide))
+        notes_written.append(n)
     if notes_written:
         _save_note_baseline(workspace_dir, baseline)
+    return notes_written, protected, sorted(set(mismatched))
+
+
+def _audio_languages(workspace_dir):
+    """Languages of the narration audio in the workspace (any model)."""
+    langs = set()
+    for name in os.listdir(workspace_dir):
+        m = re.match(r"^slide_\d+_([^.]+)\.(.+)\.m4a$", name)
+        if m:
+            langs.add(normalize_lang(m.group(1)))
+    return sorted(langs)
+
+
+AUDIO_SOURCES = "audio_sources.json"
+
+
+def _load_audio_sources(workspace_dir):
+    path = os.path.join(workspace_dir, AUDIO_SOURCES)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not read {path}: {e}")
+    return {}
+
+
+def record_audio_sources(workspace_dir, slides, lang, model_label, dictionary_paths, since):
+    """Remember, for each audio file made in this run, the text (and dictionaries) it was
+    made from, so that pack and verify can tell when the text has been edited since."""
+    record = _load_audio_sources(workspace_dir)
+    dict_fp = hashlib.sha1(b"".join(open(p, "rb").read() for p in (dictionary_paths or [])
+                                    if p and os.path.exists(p))).hexdigest()[:10]
+    made = []
+    for n in slides:
+        audio = audio_filename(n, lang, model_label)
+        path = os.path.join(workspace_dir, audio)
+        if not os.path.exists(path) or os.path.getmtime(path) < since:
+            continue
+        record[audio] = {"text": text_filename(n, lang),
+                         "text_fingerprint": text_fingerprint(_read_text(os.path.join(workspace_dir, text_filename(n, lang)))),
+                         "dictionary_fingerprint": dict_fp,
+                         "made_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(os.path.getmtime(path)))}
+        made.append(n)
+    if made:
+        with open(os.path.join(workspace_dir, AUDIO_SOURCES), "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
+    return made
+
+
+def audio_is_older_than_text(workspace_dir, s_num, lang, model_label, record=None):
+    """True if the text of a slide was edited after its audio was made (None: no record)."""
+    record = _load_audio_sources(workspace_dir) if record is None else record
+    entry = record.get(audio_filename(s_num, lang, model_label))
+    if not entry:
+        return None
+    text = _read_text(os.path.join(workspace_dir, text_filename(s_num, lang)))
+    return text_fingerprint(text) != entry.get("text_fingerprint")
+
+
+def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
+                   targets=None, update=False, overwrite=False, audio_lang="same",
+                   remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
+    """Write the texts (into the notes) and the narration audio of the workspace into a copy
+    of the deck.
+
+    lang: the language of the texts to write (None: every language in the workspace).
+    audio_lang: the language of the audio to write ("same": lang; None: no audio).
+    targets: subset of {"audio", "text"} (default: both).
+    update / overwrite: see _pack_notes; update also leaves out audio the deck already has.
+    """
+    logger.info("--- [Option: Pack] Rebuilding PPTX ---")
+    targets = set(targets or {"audio", "text"})
+    if audio_lang == "same":
+        audio_lang = lang
+    prs = Presentation(original_pptx)
+    notes_written, protected, mismatched = _pack_notes(prs, workspace_dir, requested_slides, lang, targets,
+                                                       update, overwrite, audio_lang)
 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)
@@ -1622,11 +1977,19 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
             z.extractall(tmpdir)
         slide_w, slide_h = _slide_size(tmpdir)
         slide_parts = _slide_part_paths(tmpdir)
-        if "audio" in targets:
+        if "audio" in targets and audio_lang:
             for s_num in requested_slides:
-                m4a_p = os.path.join(workspace_dir, audio_filename(s_num, lang, model_label))
-                if not os.path.exists(m4a_p) or s_num > len(slide_parts):
+                if s_num > len(slide_parts):
                     continue
+                name = audio_filename(s_num, audio_lang, model_label)
+                m4a_p = os.path.join(workspace_dir, name)
+                if not os.path.exists(m4a_p):
+                    if os.path.exists(os.path.join(workspace_dir, text_filename(s_num, audio_lang))):
+                        logger.warning(f"Slide #{s_num}: {name} was not found; no audio written.")
+                    continue
+                if audio_is_older_than_text(workspace_dir, s_num, audio_lang, model_label):
+                    logger.warning(f"Slide #{s_num}: {text_filename(s_num, audio_lang)} was edited after {name} "
+                                   f"was made; the audio does not say the text (synthesize it again).")
                 if update and _slide_audio_matches(tmpdir, slide_parts[s_num - 1], m4a_p):
                     audio_same += 1
                     logger.info(f"Slide #{s_num}: the deck already has this audio (left as is, --update).")
@@ -1636,6 +1999,9 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
                                          remove_recorded=remove_recorded, icon_outside=icon_outside,
                                          pause_ms=pause_ms):
                     embedded += 1
+                    logger.info(f"Slide #{s_num}: audio {name} written.")
+                else:
+                    logger.warning(f"Slide #{s_num}: audio {name} could not be written (see above).")
         _ensure_default_content_types(tmpdir, {"m4a": "audio/mp4", "png": "image/png"})
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
@@ -1648,12 +2014,12 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
     logger.info(summary)
     if protected:
         logger.warning("Notes not overwritten because they were edited in the deck: "
-                       + ", ".join(map(str, protected)) + ".")
+                       + ", ".join(map(str, sorted(set(protected)))) + ".")
     if mismatched:
-        logger.warning("Slides whose note does not match their narration: "
-                       + ", ".join(map(str, sorted(set(mismatched)))) + ".")
+        logger.warning("Slides whose note does not match the texts of the workspace: "
+                       + ", ".join(map(str, mismatched)) + ".")
     logger.info(f"Final output saved to: {output_pptx}")
-    return embedded, notes_written, sorted(set(mismatched))
+    return embedded, notes_written, mismatched
 
 
 # ------------------------------------------
@@ -1995,12 +2361,13 @@ def _zip_package(pkg_dir, zip_path):
 DESCRIPTION = """PPTX-Narrator: automated narration of PowerPoint presenter notes
 
 Usage:
-  pptx-narrator COMMAND [INPUT] [OPTIONS]
-  pptx-narrator COMMAND --help          the options of one command
+  pptx-narrator WS COMMAND [INPUT] [OUTPUT] [OPTIONS]
+  pptx-narrator WS COMMAND --help       the options of one command
 
-INPUT may be a file or directory. A directory is processed using the file types
-accepted by the command. If INPUT is omitted, the last explicit input for that
-command is reused only after its identity has been verified with SHA-256.
+WS is the workspace directory of one deck. INPUT and OUTPUT are the files outside
+WS that a command reads or writes: the deck whose notes are taken in, the dictionary
+of scan, and for pack the deck and the copy to save. The files inside WS are chosen
+with --lang, --slides and the model options, not by path.
 
 Options may also be written with underscores (--in_lang) and kept in a TOML
 configuration file; see --config.
@@ -2087,48 +2454,6 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
-def _suggest_command(command, input_path, workspace_hint, in_lang=None):
-    """The command the user most likely meant, when the one given cannot work.
-
-    Everything needed is already known -- which command was asked for, what was
-    handed to it, and which workspace is in play -- so the correction is worked
-    out rather than guessed at.
-    """
-    def _lang():
-        return f" --in-lang {in_lang}" if in_lang else " --in-lang <lang>"
-
-    if command in {"scan", "translate", "synthesize", "verify"}:
-        if input_path and input_path.lower().endswith(".pptx"):
-            # A deck was handed to a workspace command.
-            if workspace_hint:
-                return f"pptx-narrator {command} {workspace_hint}{_lang()}"
-            guess = os.path.join(os.path.dirname(input_path) or ".",
-                                 "workspace_" + os.path.splitext(os.path.basename(input_path))[0])
-            if os.path.isdir(guess):
-                return f"pptx-narrator {command} {os.path.relpath(guess)}{_lang()}"
-            return (f"pptx-narrator extract {input_path} --workspace ws  # first, then\n"
-                    f"  pptx-narrator {command} ws{_lang()}")
-        if not input_path and not workspace_hint:
-            return f"pptx-narrator {command} <workspace>{_lang()}"
-    if command in {"extract", "pack"} and input_path and os.path.isdir(input_path):
-        # A workspace was handed to a command that takes the deck.
-        decks = sorted(n for n in os.listdir(os.path.dirname(input_path) or ".")
-                       if n.lower().endswith(".pptx"))
-        deck = decks[0] if len(decks) == 1 else "<deck>.pptx"
-        return f"pptx-narrator {command} {deck} --workspace {input_path}"
-    return None
-
-
-def _did_you_mean(suggestion):
-    return f"\n\nDid you mean:\n  {suggestion}" if suggestion else ""
-
-
-def _is_workspace_file(name):
-    """Whether a file name is one a workspace command can be pointed at."""
-    return bool(_TEXT_FILE_RE.match(name)
-                or re.match(r"^slide_\d+_[^.]+\.(.+)\.(m4a|spoken\.txt)$", name))
-
-
 def _file_role(name):
     """What a workspace file is, for the record of a directory input."""
     if name.endswith(".spoken.txt"):
@@ -2194,69 +2519,6 @@ def _snapshot_matches(saved, current):
     old = {x["path"]: x.get("sha256") for x in saved.get("files", [])}
     new = {x["path"]: x.get("sha256") for x in current.get("files", [])}
     return old == new
-
-
-def _resolve_input(command, explicit_input, state, workspace_dir=None):
-    """Resolve explicit input or a verified last input for this command.
-
-    A recorded input inside the workspace is stored relative to it, so it is
-    resolved against the workspace rather than against the current directory.
-    """
-    if explicit_input:
-        snap = _input_snapshot(explicit_input, command)
-        return snap["path"], snap
-    saved = state.get("commands", {}).get(command, {}).get("input")
-    if not saved:
-        raise RuntimeError(f"no previous input is recorded for '{command}'; specify INPUT explicitly")
-    saved_path = saved["path"]
-    if not os.path.isabs(saved_path) and workspace_dir:
-        saved_path = os.path.normpath(os.path.join(workspace_dir, saved_path))
-    current = _input_snapshot(saved_path, command)
-    if not _snapshot_matches(_relativize_snapshot(saved, workspace_dir),
-                             _relativize_snapshot(current, workspace_dir)):
-        raise RuntimeError(
-            f"the previously used input for '{command}' has changed; specify INPUT explicitly"
-        )
-    return current["path"], current
-
-
-
-
-def _validate_input_language(path, command, in_lang):
-    """Reject an explicitly language-tagged input whose language contradicts --in-lang."""
-    if not in_lang or command == "extract":
-        return
-    langs = [in_lang] if isinstance(in_lang, str) else list(in_lang)
-    wanted = {base_lang(x) for x in langs}
-    candidates = []
-    if os.path.isfile(path):
-        candidates = [os.path.basename(path)]
-    elif os.path.isdir(path):
-        candidates = [n for n in os.listdir(path) if os.path.isfile(os.path.join(path, n))]
-    tagged = []
-    matched = []
-    for name in candidates:
-        m = _TEXT_FILE_RE.match(name)
-        if not m or not m.group(2):
-            # Audio filenames use the same slide_N_<lang> convention.
-            m2 = re.match(r"^slide_\d+_([A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})?)\.", name)
-            if not m2:
-                continue
-            actual = base_lang(normalize_lang(m2.group(1)))
-        else:
-            actual = base_lang(normalize_lang(m.group(2)))
-        tagged.append((name, actual))
-        if actual in wanted:
-            matched.append(name)
-    if os.path.isfile(path) and tagged and not matched:
-        name, actual = tagged[0]
-        raise RuntimeError(
-            f"input language mismatch: '{name}' is '{actual}', but --in-lang is '{in_lang}'"
-        )
-    if os.path.isdir(path) and tagged and not matched:
-        raise RuntimeError(
-            f"no input data matching --in-lang '{in_lang}' was found in '{path}'"
-        )
 
 
 def _record_input(state, command, snapshot, extra=None):
@@ -2436,12 +2698,49 @@ def _apply_cli_config_defaults(namespace, config_values):
             setattr(namespace, key, value)
 
 
+COMMANDS = ("extract", "scan", "translate", "synthesize", "verify", "pack", "history")
+
+SLIDES_HELP = "Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)"
+
+
+def _add_lang_options(p, in_help, out_help=None, lang_help=None):
+    """--lang, --in-lang and (for translate) --out-lang.
+
+    --lang is shorthand for giving --in-lang and --out-lang the same language, so
+    that a command that reads and writes one language needs only one option.
+    """
+    _add(p, "--lang", dest="lang", type=normalize_lang, default=None,
+         help=lang_help or "Language of the text (sets --in-lang" + (" and --out-lang)" if out_help else ")"))
+    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help=in_help)
+    if out_help:
+        _add(p, "--out-lang", dest="out_lang", type=normalize_lang, default=None, help=out_help)
+
+
+def _add_overwrite_options(p, update_help, overwrite_help):
+    _add(p, "--update", dest="update", action="store_true", default=None, help=update_help)
+    _add(p, "--overwrite", dest="overwrite", action="store_true", default=None, help=overwrite_help)
+
+
+def _add_model_options(p, what):
+    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
+         help=f"TTS engine of the audio {what} (default: qwen3)")
+    _add(p, "--model", default=None, help="GPT-SoVITS model (default: v2ProPlus)")
+    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
+         help="Qwen3-TTS model size (default: 1.7B)")
+
+
 def build_parser(config_values=None):
     parser = ArgumentParser(
         prog="pptx-narrator",
+        usage="pptx-narrator WS COMMAND [INPUT] [OUTPUT] [options]",
         description=DESCRIPTION,
+        epilog="WS comes first and COMMAND second. The options of a command may be given\n"
+               "anywhere after COMMAND. Files inside WS are chosen with --lang, --slides and\n"
+               "the model options, not by path.",
         formatter_class=HelpFormatter,
     )
+    parser.add_argument("workspace", metavar="WS",
+                        help="Workspace directory holding the texts and audio of one deck")
     _add_common_options(parser, config_values or {})
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", title="Commands")
@@ -2450,68 +2749,70 @@ def build_parser(config_values=None):
     parser._action_groups.insert(1, parser._action_groups.pop())
 
     # ---- extract ---------------------------------------------------------
-    p = sub.add_parser("extract", help="Extract presenter notes from a PPTX",
-                       description="Extract the presenter notes of a PPTX into one text file per slide,\nnamed after the slide and the language of the note.",
+    p = sub.add_parser("extract", help="Extract presenter notes from a PPTX into WS",
+                       description="Extract the presenter notes of a PPTX into one text file per slide,\n"
+                                   "named after the slide and the language of the note. WS is created\n"
+                                   "when it does not exist.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Input PPTX file")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None,
-         help="Language(s) of notes to extract, e.g. ja or ja,en\n(default: every language found in the deck)")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Output workspace directory (default: workspace_<filename>)")
-    _add(p, "--slides", dest="slides", default=None, help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
+    p.add_argument("deck", metavar="DECK", help="PPTX file whose notes are extracted")
+    _add_lang_options(p, "Language(s) of notes to extract, e.g. ja or ja,en\n(default: every language found in the deck)",
+                      lang_help="Same as --in-lang")
+    _add_overwrite_options(p, "Take in again a note that changed in the deck, where its text\n"
+                              "was not edited in WS since it was written",
+                           "Take in every selected note, replacing texts edited in WS")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
-    # ---- directory/text commands ---------------------------------------
-    p = sub.add_parser("scan", help="Scan text input for technical terms",
-                       description="Scan text for technical terms and add them to a dictionary, where their\nreading or translation can be corrected by hand.",
+    # ---- scan ------------------------------------------------------------
+    p = sub.add_parser("scan", help="Collect terms of the texts into a dictionary",
+                       description="Scan the texts of WS for technical terms and write them into a\n"
+                                   "dictionary, where their reading or translation can be corrected by hand.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Input text file or directory")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
+    p.add_argument("dictionary", metavar="DICT",
+                   help="Dictionary CSV to create, or to add to with --append")
+    _add_lang_options(p, "Language of the texts to scan")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
-         help="Dictionary CSV to update; repeatable")
+         help="Other dictionary CSV(s) whose terms need not be proposed again;\nrepeatable (read only)")
+    _add(p, "--append", dest="append", action="store_true", default=None,
+         help="Add new terms to an existing DICT")
+    _add(p, "--overwrite", dest="overwrite", action="store_true", default=None,
+         help="Make DICT again from scratch")
     _add(p, "--scan-compounds", dest="scan_compounds", action="store_true", default=None,
          help="With Japanese input, propose Japanese compounds in the dictionary")
-    _add(p, "--slides", dest="slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Optional workspace associated with the input (normally not needed)")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
-    p = sub.add_parser("translate", help="Translate text input",
-                       description="Translate text from --in-lang into --out-lang, leaving the result as a\ntext file that can be reviewed before it is synthesized.",
+    # ---- translate -------------------------------------------------------
+    p = sub.add_parser("translate", help="Write the texts in another language",
+                       description="Translate the texts of WS from --in-lang into --out-lang, leaving the\n"
+                                   "result as a text file that can be reviewed before it is synthesized.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Input text file or directory")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input text")
-    _add(p, "--out-lang", dest="out_lang", type=normalize_lang, default=None, help="Language of the translated output")
+    _add_lang_options(p, "Language of the texts to translate", "Language of the translation")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
          help="Translation dictionary CSV(s): terms of the notes and how to\ntranslate them, given to the model as instructions")
     _add(p, "--translate-model", dest="translate_model", default=None,
          help="Hugging Face id of the translation model (default: Qwen/Qwen3-4B;\nsee README for alternatives)")
     _add(p, "--translate-device", dest="translate_device", default=None,
          help="auto / cuda:0 / mps / cpu (default: auto)")
-    _add(p, "--retranslate", dest="retranslate", action="store_true", default=None,
-         help="Overwrite existing translations")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Workspace containing input/output text")
-    _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
+    _add_overwrite_options(p, "Translate again where the source text has changed since it was\n"
+                              "translated (a translation edited since is kept)",
+                           "Translate again every selected slide, replacing existing translations")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
+    # ---- synthesize ------------------------------------------------------
     p = sub.add_parser("synthesize", help="Generate voice-cloned narration",
-                       description="Generate narration audio from text, in a voice cloned from a short\nreference recording.",
+                       description="Generate narration audio from the texts of WS, in a voice cloned from\n"
+                                   "a short reference recording. Existing audio is replaced.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Input text file or directory")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the input narration text")
+    _add_lang_options(p, "Language of the texts to read")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
          help="Dictionary CSV(s) applied before synthesis")
     _add(p, "--letter-map", dest="letter_map", default=None,
          help="JSON mapping of letters to readings")
-    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None, help="TTS engine")
-    _add(p, "--ref-wav", dest="ref_wav", default=None, help="Reference recording (.wav)")
-    _add(p, "--ref-text", dest="ref_text", default=None, help="Transcript of --ref-wav")
+    _add(p, "--ref-wav", dest="ref_wav", default=None, help="Reference recording (.wav file)")
+    _add(p, "--ref-text", dest="ref_text", default=None, help="Text file with the transcript of --ref-wav")
     _add(p, "--ref-lang", dest="ref_lang", type=normalize_lang, default=None,
          help="Language of reference recording for GPT-SoVITS")
+    _add_model_options(p, "to generate")
     _add(p, "--api-url", dest="api_url", default=None, help="GPT-SoVITS API server URL")
-    _add(p, "--model", default=None, help="GPT-SoVITS model")
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
-         help="Qwen3-TTS model size (default: 1.7B)")
     _add(p, "--qwen3-device", dest="qwen3_device", default=None, help="auto / cuda:0 / mps / cpu")
     _add(p, "--enable-drc", dest="enable_drc", action="store_true", default=None,
          help="Even out the loudness of the generated audio (default: off)")
@@ -2519,25 +2820,19 @@ def build_parser(config_values=None):
          help="Level in dBFS above which --enable-drc compresses (default: -20.0)")
     _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None,
          help="Compression ratio used by --enable-drc (default: 3.0)")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Workspace containing input text and generated audio")
-    _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
-    p = sub.add_parser("verify", help="Verify generated narration with ASR",
-                       description="Transcribe the generated narration and compare it with the text it came\nfrom, to report the slides most likely to be misread.",
+    # ---- verify ----------------------------------------------------------
+    p = sub.add_parser("verify", help="Check the generated narration with ASR",
+                       description="Transcribe the generated narration and compare it with the text it came\n"
+                                   "from, to report the slides most likely to be misread.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Input audio/text directory or file")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration")
-    _add(p, "--model", default=None, help="TTS model label used in filenames")
-    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
-         help="TTS engine, used to derive the model label")
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
-         help="Qwen3-TTS model size (default: 1.7B)")
+    _add_lang_options(p, "Language of the narration")
+    _add_model_options(p, "to check")
     _add(p, "--asr-model", dest="asr_model", default=None,
-         help="faster-whisper model used for the check (default: large-v3)")
+         help="faster-whisper model used for the check (default: small)")
     _add(p, "--asr-device", dest="asr_device", default=None,
-         help="auto / cuda / cpu (default: auto)")
+         help="auto / cuda / cpu (default: cpu)")
     _add(p, "--verify-threshold", dest="verify_threshold", type=float, default=None,
          help="Flag a slide whose similarity falls below this (0-1, default: 0.85)")
     _add(p, "--min-difference", dest="min_difference", type=int, default=None,
@@ -2546,35 +2841,23 @@ def build_parser(config_values=None):
          help="Flag a slide with one stretch of disagreement longer than this\n(characters, default: 40; 0 disables)")
     _add(p, "--cer-threshold", dest="cer_threshold", type=float, default=None,
          help="Also flag a slide whose character error rate exceeds this\n(default: off)")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Workspace containing audio and spoken-text sidecars")
-
-    _add(p, "--slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
     # ---- pack ------------------------------------------------------------
-    p = sub.add_parser("pack", help="Embed generated narration into a PPTX",
-                       description="Write the generated audio and the slide timings into the deck, which\nthen plays by itself and can be exported as a video.",
+    p = sub.add_parser("pack", help="Write the narration of WS into a copy of a PPTX",
+                       description="Write the texts (into the notes) and the generated audio of WS into a\n"
+                                   "copy of DECK, saved as OUT, which then plays by itself and can be\n"
+                                   "exported as a video. DECK itself is not changed.",
                        formatter_class=HelpFormatter)
-    p.add_argument("input", nargs="?", help="Original/input PPTX file")
-    p.add_argument("target", nargs="?", default=None, choices=PACK_TARGETS, metavar="target",
-                   help="What to write into the deck: audio, text (the text the audio was\n"
-                        "synthesized from, into the notes), or all (default: all)")
-    _add(p, "--workspace", dest="workspace", default=None,
-         help="Workspace containing generated text/audio (required unless recoverable from state)")
-    _add(p, "--out", default=None, help="Output PPTX path")
-    _add(p, "--in-lang", dest="in_lang", type=normalize_lang, default=None, help="Language of the narration data being packed")
-    _add(p, "--model", default=None, help="TTS model label used in filenames")
-    _add(p, "--engine", choices=["gpt_sovits", "qwen3"], default=None,
-         help="TTS engine whose audio is packed, used to derive the model label")
-    _add(p, "--qwen3-model-size", dest="qwen3_model_size", choices=["0.6B", "1.7B"], default=None,
-         help="Qwen3-TTS model size (default: 1.7B)")
-    _add(p, "--slides", dest="slides", default=None,
-         help="Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)")
-    _add(p, "--update", dest="update", action="store_true", default=None,
-         help="Leave out audio and notes that are already the same in the deck\n(default: off)")
-    _add(p, "--forceupdate", dest="forceupdate", action="store_true", default=None,
-         help="Overwrite notes edited in the deck since extract (default: off)")
+    p.add_argument("deck", metavar="DECK", help="PPTX file to write into (it is not changed)")
+    p.add_argument("out_deck", metavar="OUT", help="PPTX file to save the result as")
+    _add(p, "--lang", dest="lang", type=normalize_lang, default=None, help="Language of the narration to write")
+    _add(p, "--data-type", dest="data_type", choices=PACK_TARGETS, default=None,
+         help="What to write: text (into the notes), audio, or all (default: all)")
+    _add_model_options(p, "to write")
+    _add_overwrite_options(p, "Write where WS differs from the deck; also allows an existing OUT",
+                           "Write everything selected, even over notes edited in the deck;\n"
+                           "also allows an existing OUT")
     _add(p, "--slide-pause", dest="slide_pause", type=float, default=None,
          help="Seconds between the end of the narration and the automatic\nslide advance (default: 1.0)")
     _add(p, "--keep-audio-icon", dest="keep_audio_icon", action="store_true", default=None,
@@ -2582,7 +2865,15 @@ def build_parser(config_values=None):
     _add(p, "--remove-recorded", dest="remove_recorded", choices=["all", "pointer", "events", "none"],
          default=None,
          help="Settings of a previous recording to remove: trim/fade/bookmarks,\nlaser-pointer path, playback events (default: all)")
+    _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
+    # ---- history --------------------------------------------------------
+    p = sub.add_parser("history", help="List the commands run in WS",
+                       description="List the commands run in WS, oldest first, with the files they read\n"
+                                   "and wrote.",
+                       formatter_class=HelpFormatter)
+    _add(p, "--dates", dest="dates", action="store_true", default=None, help="Show when each command was run")
+    _add(p, "--slides", dest="slides", default=None, help=argparse.SUPPRESS)
 
     # --config is read from anywhere in the command line; accept it after the
     # command as well, which is where people naturally write it.
@@ -2594,9 +2885,10 @@ def build_parser(config_values=None):
 
 def _defaults():
     return {
-        "extract": {"workspace": None, "slides": None},
-        "scan": {"scan_compounds": False, "slides": None},
-        "translate": {"retranslate": False, "dict_file": None, "slides": None,
+        "extract": {"slides": None, "update": False, "overwrite": False},
+        "scan": {"scan_compounds": False, "slides": None, "dict_file": None,
+                 "append": False, "overwrite": False},
+        "translate": {"dict_file": None, "slides": None, "update": False, "overwrite": False,
                       "translate_model": TRANSLATE_MODEL_DEFAULT, "translate_device": "auto"},
         "synthesize": {
             "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/", "slides": None,
@@ -2609,21 +2901,35 @@ def _defaults():
             "asr_model": "small", "asr_device": "cpu", "verify_threshold": 0.85,
             "min_difference": 4, "max_difference": 40, "cer_threshold": None, "slides": None,
         },
+        "history": {"dates": False},
         "pack": {
-            "workspace": None, "out": "output.pptx", "model": "v2ProPlus", "engine": "qwen3",
-            "qwen3_model_size": "1.7B", "target": None, "slides": None, "update": False,
-            "forceupdate": False, "slide_pause": 1.0, "keep_audio_icon": False,
-            "remove_recorded": "all",
+            "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
+            "data_type": "all", "slides": None, "update": False, "overwrite": False,
+            "slide_pause": 1.0, "keep_audio_icon": False, "remove_recorded": "all",
         },
     }
+
+
+# Positional arguments name files; they are recorded as paths, not as settings.
+_POSITIONAL_KEYS = {"command", "workspace", "deck", "out_deck", "dictionary", "config"}
+# Configuration keys of earlier versions that no longer mean anything.
+_RETIRED_CONFIG_KEYS = {"workspace": None, "out": None, "target": "data_type", "input": None,
+                        "retranslate": "overwrite", "forceupdate": "overwrite"}
+# Settings that are paths, recorded relative to the workspace when inside it.
+_PATH_SETTINGS = ("dict_file", "letter_map", "ref_wav", "ref_text")
 
 
 def _merge_effective(command, args, config, parser):
     values = _defaults().get(command, {}).copy()
     cfg = _config_for_command(config, command)
+    for key, replacement in _RETIRED_CONFIG_KEYS.items():
+        if key in cfg:
+            cfg.pop(key)
+            logger.warning(f"The configuration key '{key}' is no longer used"
+                           + (f"; use '{replacement}'." if replacement else "."))
     _deep_update(values, cfg)
     for key, value in vars(args).items():
-        if key.startswith("_") or key in {"command", "input", "config"}:
+        if key.startswith("_") or key in _POSITIONAL_KEYS:
             continue
         # argparse uses None for omitted optional values; boolean flags also use None here.
         if value is None:
@@ -2637,22 +2943,33 @@ def _merge_effective(command, args, config, parser):
     return values
 
 
-def _inherit_synthesis_settings(command, values, args, config, state):
-    """Use the last successful synthesis in this workspace when not overridden.
-
-    CLI and TOML values remain authoritative.  This prevents a Qwen3 synthesis
-    followed by a bare ``pack`` from silently looking for GPT-SoVITS filenames.
-    """
-    if command not in {"verify", "pack"}:
+def _resolve_lang(command, values, args, parser):
+    """Turn --lang into --in-lang (and --out-lang for translate)."""
+    lang = values.pop("lang", None)
+    explicit = [flag for flag, key in (("--in-lang", "in_lang"), ("--out-lang", "out_lang"))
+                if getattr(args, key, None) is not None]
+    if lang is None:
         return values
-    prior = state.get("commands", {}).get("synthesize", {}).get("resolved_config", {})
-    if not prior:
-        return values
-    configured = _config_for_command(config, command)
-    for key in ("in_lang", "engine", "model", "qwen3_model_size"):
-        if getattr(args, key, None) is None and key not in configured and prior.get(key) is not None:
-            values[key] = prior[key]
+    if getattr(args, "lang", None) is not None and explicit:
+        parser.error(f"--lang cannot be combined with {' or '.join(explicit)}")
+    if getattr(args, "lang", None) is None and explicit:
+        return values  # --in-lang/--out-lang on the command line win over lang in the configuration
+    values["in_lang"] = lang
+    if command == "translate":
+        values["out_lang"] = lang
     return values
+
+
+def _record_effective(effective, workspace_dir):
+    """The settings as recorded: paths inside the workspace relative to it."""
+    out = dict(effective)
+    for key in _PATH_SETTINGS:
+        value = out.get(key)
+        if isinstance(value, list):
+            out[key] = [_rel_to_workspace(v, workspace_dir) if v else v for v in value]
+        elif value:
+            out[key] = _rel_to_workspace(value, workspace_dir)
+    return out
 
 
 def _audio_model_labels(workspace_dir, lang):
@@ -2679,6 +2996,10 @@ def _text_slides(workspace_dir, lang):
             if os.path.exists(os.path.join(workspace_dir, text_filename(slide, lang)))]
 
 
+def _model_label(v):
+    return v["model"] if v["engine"] == "gpt_sovits" else f"qwen3-{v['qwen3_model_size']}"
+
+
 def _validate_and_normalize(command, v, parser):
     if command == "extract":
         if v.get("in_lang"):
@@ -2693,15 +3014,18 @@ def _validate_and_normalize(command, v, parser):
             parser.error("--in-lang/--out-lang cannot be 'auto'")
         if lang_suffix(v["in_lang"]) == lang_suffix(v["out_lang"]):
             parser.error("translate requires different --in-lang and --out-lang")
-    elif command in {"scan", "synthesize", "verify", "pack"}:
+    elif command in {"scan", "synthesize", "verify"}:
         if not v.get("in_lang"):
-            parser.error(f"{command} requires --in-lang")
-        if v["in_lang"] == "auto":
-            parser.error("--in-lang cannot be 'auto'")
+            parser.error(f"{command} requires --lang")
+    if command in {"scan", "synthesize", "verify", "pack"}:
+        if v.get("in_lang") == "auto":
+            parser.error("--lang cannot be 'auto'")
     if command in {"scan", "translate", "synthesize"} and isinstance(v.get("dict_file"), str):
         v["dict_file"] = [v["dict_file"]]
-    if command == "scan" and not v.get("dict_file"):
-        parser.error("scan requires --dict-file")
+    if command in {"extract", "scan", "translate", "pack"} and v.get("update") and v.get("overwrite"):
+        parser.error("--update and --overwrite cannot be combined")
+    if command == "scan" and v.get("append") and v.get("overwrite"):
+        parser.error("--append and --overwrite cannot be combined")
     if command == "synthesize":
         missing = [flag for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text", "ref_text")) if not v.get(key)]
         if missing:
@@ -2709,197 +3033,166 @@ def _validate_and_normalize(command, v, parser):
         if v["engine"] == "qwen3" and qwen3_language(v["in_lang"]) is None:
             parser.error(f"Qwen3-TTS does not support '{v['in_lang']}' (supported: {', '.join(QWEN3_LANGUAGES)})")
         if v["engine"] == "gpt_sovits":
-            for flag, code in (("--in-lang", v["in_lang"]), ("--ref-lang", v["ref_lang"])):
+            for flag, code in (("--lang", v["in_lang"]), ("--ref-lang", v["ref_lang"])):
                 if gpt_sovits_language(code) is None:
                     parser.error(f"GPT-SoVITS does not support {flag} '{code}' (supported: {', '.join(GPT_SOVITS_LANGUAGES)})")
             if v["model"] not in MODELS_CONFIG:
                 parser.error(f"unknown GPT-SoVITS model '{v['model']}' (available: {', '.join(MODELS_CONFIG)})")
-    if command == "verify":
-        if v["engine"] == "qwen3":
-            v["model"] = f"qwen3-{v['qwen3_model_size']}"
-    if command == "pack" and v["engine"] == "qwen3":
+    if command in {"verify", "pack"} and v["engine"] == "qwen3":
         v["model"] = f"qwen3-{v['qwen3_model_size']}"
     return v
 
 
+def _check_command_line(boot, parser):
+    """Catch the two likely slips of the WS-first command line before argparse does."""
+    if boot.workspace in COMMANDS and boot.command not in COMMANDS:
+        parser.error(f"the workspace comes first and the command second:\n"
+                     f"  pptx-narrator <workspace> {boot.workspace} ...")
+    if boot.command and boot.command not in COMMANDS:
+        close = difflib.get_close_matches(boot.command, COMMANDS, n=1)
+        parser.error(f"unknown command '{boot.command}'"
+                     + (f"; did you mean '{close[0]}'?" if close else f" (commands: {', '.join(COMMANDS)})"))
+
+
 def main(argv=None):
-    # Parse command first without loading a config so --config can be honored cleanly.
+    # Parse WS and the command first without loading a config, so that --config can be honored.
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
+    bootstrap.add_argument("workspace", nargs="?")
     bootstrap.add_argument("command", nargs="?")
-    bootstrap.add_argument("input", nargs="?")
-    boot, _ = bootstrap.parse_known_args(argv)
+    boot, _ = bootstrap.parse_known_args(_normalize_argv(argv))
     try:
         config, config_path = _load_config(boot.config)
     except RuntimeError as e:
         raise SystemExit(str(e))
 
     parser = build_parser(config)
-    # Nothing runs without a command, but say what the commands are instead of
-    # only complaining that one is missing.
     if not boot.command:
-        # -h, --help and --version are answers in themselves; without a command
-        # they were reaching the "no command given" path below and leaving with
-        # a failure status, --version without even printing the version.
+        # -h, --help and --version are answers in themselves.
         asked = set(sys.argv[1:] if argv is None else argv) & {"-h", "--help", "--version"}
         if asked:
             parser.parse_args(argv)  # argparse prints it and exits 0
+        if boot.workspace in COMMANDS:
+            _check_command_line(boot, parser)
         parser.print_help()
         raise SystemExit(1)
+    _check_command_line(boot, parser)
     args = parser.parse_args(argv)
-    # "pack text" with the deck taken from the previous run: the one positional
-    # given is the target, not the input.
-    if (args.command == "pack" and args.target is None and args.input in PACK_TARGETS
-            and not os.path.exists(args.input)):
-        args.target, args.input = args.input, None
     command = args.command
+    ws = os.path.abspath(args.workspace)
     effective = _merge_effective(command, args, config, parser)
-
-    # Execution state belongs to the workspace, never to whatever directory
-    # happened to be current when a command was run.  A directory INPUT remains
-    # accepted as a backwards-compatible spelling of --workspace.
-    workspace_hint = effective.get("workspace")
-    if not workspace_hint and command in {"scan", "translate", "synthesize", "verify"} and args.input:
-        if os.path.isdir(args.input) or not os.path.isfile(args.input):
-            workspace_hint = args.input
-    if command == "extract" and workspace_hint:
-        workspace_hint = os.path.abspath(workspace_hint)
-        os.makedirs(workspace_hint, exist_ok=True)
-    elif command != "extract":
-        if not workspace_hint:
-            parser.error(f"{command} requires --workspace (or a workspace directory as INPUT)"
-                         + _did_you_mean(_suggest_command(command, args.input, None,
-                                                          effective.get("in_lang"))))
-        workspace_hint = os.path.abspath(workspace_hint)
-        if not os.path.isdir(workspace_hint):
-            parser.error(f"workspace does not exist: {workspace_hint}\n\nCheck the path, or create it first:\n"
-                         f"  pptx-narrator extract <deck>.pptx --workspace {workspace_hint}")
-
-    state = _load_state(_workspace_path(workspace_hint, STATE_FILE)) if workspace_hint else _load_state()
-    effective = _inherit_synthesis_settings(command, effective, args, config, state)
+    effective = _resolve_lang(command, effective, args, parser)
     effective = _validate_and_normalize(command, effective, parser)
-    if command in {"verify", "pack"}:
+
+    deck = out = dict_out = None
+    if command in {"extract", "pack"}:
+        deck = os.path.abspath(args.deck)
+        if not os.path.isfile(deck) or not deck.lower().endswith(".pptx"):
+            parser.error(f"{command} DECK must be a PPTX file: {args.deck}")
+    if command == "extract":
+        if os.path.exists(ws) and not os.path.isdir(ws):
+            parser.error(f"WS is not a directory: {args.workspace}")
+        os.makedirs(ws, exist_ok=True)
+    elif not os.path.isdir(ws):
+        parser.error(f"workspace does not exist: {args.workspace}\n\nCreate it by extracting a deck into it:\n"
+                     f"  pptx-narrator {args.workspace} extract <deck>.pptx")
+    if command == "history":
+        show_history(ws, dates=effective.get("dates"))
+        return
+    log_handler = _open_workspace_log(ws, argv)
+    before = _workspace_files(ws)
+    logger.info(f"Workspace: {ws}")
+    try:
+        _run_command(command, args, effective, config, config_path, parser, ws)
+    finally:
+        logger.removeHandler(log_handler)
+        log_handler.close()
+
+
+def _run_command(command, args, effective, config, config_path, parser, ws):
+    before = _workspace_files(ws)
+    deck = os.path.abspath(args.deck) if command in {"extract", "pack"} else None
+    out = dict_out = None
+    audio_lang = effective.get("in_lang")
+    if command == "pack" and "audio" in resolve_targets(effective.get("data_type")) and not audio_lang:
+        # The texts of every language can go into one note, but a slide plays one audio.
+        audio_langs = _audio_languages(ws)
+        if len(audio_langs) > 1:
+            parser.error("audio of several languages is in this workspace (" + ", ".join(audio_langs)
+                         + "); choose one with --lang.")
+        audio_lang = audio_langs[0] if audio_langs else None
+        if audio_lang:
+            logger.info(f"Audio: {audio_lang} (the only language with audio in this workspace).")
+    if command in {"verify", "pack"} and audio_lang:
         configured = _config_for_command(config, command)
         model_is_explicit = any(getattr(args, key, None) is not None
                                 for key in ("engine", "model", "qwen3_model_size"))
         model_is_configured = any(key in configured for key in ("engine", "model", "qwen3_model_size"))
-        labels = _audio_model_labels(workspace_hint, effective["in_lang"])
+        labels = _audio_model_labels(ws, audio_lang)
         if not model_is_explicit and not model_is_configured and len(labels) > 1:
             parser.error("multiple audio model labels are present in this workspace: "
                          + ", ".join(labels) + ". Specify --engine (and model size if applicable).")
-    try:
-        # Workspace commands need no redundant positional INPUT; the workspace
-        # itself is their explicit data source.
-        explicit_input = args.input or (workspace_hint if command in {"scan", "translate", "synthesize", "verify"} else None)
-        input_path, input_snapshot = _resolve_input(command, explicit_input, state, workspace_hint)
-        _validate_input_language(input_path, command, effective.get("in_lang"))
-    except RuntimeError as e:
-        parser.error(str(e))
 
-    # extract writes a workspace; all text/audio commands operate directly on their
-    # INPUT directory. pack consumes a PPTX and a workspace containing generated assets.
-    workspace_dir = effective.get("workspace")
     if command == "extract":
-        if not os.path.isfile(input_path) or not input_path.lower().endswith(".pptx"):
-            parser.error("extract INPUT must be a PPTX file")
-        if not workspace_dir:
-            workspace_dir = os.path.join(os.path.dirname(input_path),
-                                         "workspace_" + os.path.splitext(os.path.basename(input_path))[0])
-        workspace_dir = os.path.abspath(workspace_dir)
-        os.makedirs(workspace_dir, exist_ok=True)
-        prs = Presentation(input_path)
+        prs = Presentation(deck)
         req_slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
         langs = effective.get("in_lang")
+        flags = dict(update=effective["update"], overwrite=effective["overwrite"])
         if not langs:
-            step_extract_notes(input_path, workspace_dir, req_slides, "auto")
+            step_extract_notes(deck, ws, req_slides, "auto", **flags)
         else:
             # Extract each requested language independently. A PPTX may legitimately
             # contain notes in several languages; each requested language is therefore
             # a selector, not a claim that every note in the deck has that language.
             # A requested language the deck does not contain is an error: the run would
             # otherwise report success while producing nothing for that language.
-            missing = []
-            for lang in langs:
-                if not step_extract_notes(input_path, workspace_dir, req_slides, lang):
-                    missing.append(lang)
+            missing = [lang for lang in langs if not step_extract_notes(deck, ws, req_slides, lang, **flags)]
             if missing:
-                parser.error("no note in " + ", ".join(missing) + " was found in " + os.path.basename(input_path))
-        _record_input(state, command, input_snapshot, {"workspace": workspace_dir})
-    else:
-        file_workspace_tmp = None
-        original_file_input = None
-        if command in {"scan", "translate", "synthesize", "verify"}:
-            if os.path.isdir(input_path):
-                workspace_dir = input_path
-            elif os.path.isfile(input_path):
-                # A single file names one slide of a workspace. Anything else -- a deck,
-                # most obviously -- would silently become a workspace of its own and find
-                # nothing, so it is refused here rather than reported as missing audio.
-                if not _is_workspace_file(os.path.basename(input_path)):
-                    parser.error(f"{command} INPUT must be a workspace directory or one of its files "
-                                 f"(slide_N_<lang>.txt or slide_N_<lang>.<model>.m4a), not "
-                                 f"{os.path.basename(input_path)}"
-                                 + _did_you_mean(_suggest_command(command, input_path, workspace_hint,
-                                                                  effective.get("in_lang"))))
-                owner = os.path.abspath(os.path.dirname(input_path) or ".")
-                if workspace_hint and os.path.abspath(workspace_hint) != owner:
-                    parser.error(f"INPUT {input_path} is not in --workspace {workspace_hint}; "
-                                 "name the file inside that workspace, or drop --workspace")
-                original_file_input = input_path
-                file_workspace_tmp = _prepare_file_workspace(command, input_path, effective.get("in_lang"))
-                workspace_dir = file_workspace_tmp
-            else:
-                parser.error(f"{command} INPUT must be a file or directory")
-        elif command == "pack":
-            if not os.path.isfile(input_path) or not input_path.lower().endswith(".pptx"):
-                parser.error("pack INPUT must be a PPTX file")
-            if not workspace_dir:
-                # Prefer the workspace associated with the most recent extract of this PPTX.
-                extract_state = state.get("commands", {}).get("extract", {})
-                if extract_state.get("input") and _snapshot_matches(extract_state["input"], input_snapshot):
-                    workspace_dir = extract_state.get("workspace")
-                    if workspace_dir:
-                        logger.info(f"Using the workspace of the last extract of this deck: {workspace_dir} "
-                                    "(give --workspace to choose another).")
-            if not workspace_dir or not os.path.isdir(workspace_dir):
-                parser.error("pack requires --workspace unless a matching extract workspace is available")
-            workspace_dir = os.path.abspath(workspace_dir)
-
-    if command == "extract":
-        effective["workspace"] = workspace_dir
-    logger.info(f"Workspace: {os.path.abspath(workspace_dir)}")
-    if command in {"scan", "translate", "synthesize", "verify", "pack"}:
-        # For directories, the command's INPUT is the processing workspace; for pack it is the PPTX.
-        pass
-
-    # The remaining command implementations operate on the existing workspace-based functions.
-    if command == "scan":
-        dictionaries = load_dictionaries(effective["dict_file"], effective["in_lang"])
-        available_slides = _text_slides(workspace_dir, effective["in_lang"])
+                parser.error("no note in " + ", ".join(missing) + " was found in " + os.path.basename(deck))
+    elif command == "scan":
+        dict_out = os.path.abspath(args.dictionary)
+        exists = os.path.exists(dict_out)
+        if exists and not (effective["append"] or effective["overwrite"]):
+            parser.error(f"{args.dictionary} already exists. Add --append to add the new terms to it,\n"
+                         f"or --overwrite to make it again from scratch.")
+        available_slides = _text_slides(ws, effective["in_lang"])
         if not available_slides:
-            parser.error(f"no {effective['in_lang']} slide text was found in workspace: {workspace_dir}")
-        selected = sorted(parse_slide_ranges(effective.get("slides"), max(available_slides)))
-        slides = [n for n in selected if n in set(available_slides)]
-        if not slides:
-            parser.error(f"no workspace slide matches --slides {effective.get('slides')!r}")
-        step_scan_and_update_dict(workspace_dir, effective["dict_file"][0], dictionaries,
-                                  slides, effective["in_lang"],
-                                  source_lang=effective["in_lang"], for_translation=False,
-                                  propose_compounds=effective["scan_compounds"])
+            parser.error(f"no {effective['in_lang']} slide text was found in workspace: {ws}")
+        slides = _select_slides(available_slides, effective.get("slides"), parser)
+        set_aside = None
+        if exists and effective["overwrite"]:
+            # Kept until the new dictionary is written, so that a failed scan loses nothing.
+            set_aside = dict_out + ".pptx_narrator_previous"
+            os.replace(dict_out, set_aside)
+        try:
+            readable = ([dict_out] if os.path.exists(dict_out) else []) + list(effective.get("dict_file") or [])
+            dictionaries = load_dictionaries(readable, effective["in_lang"])
+            step_scan_and_update_dict(ws, dict_out, dictionaries, slides, effective["in_lang"],
+                                      source_lang=effective["in_lang"], for_translation=False,
+                                      propose_compounds=effective["scan_compounds"])
+        except BaseException:
+            if set_aside:
+                os.replace(set_aside, dict_out)
+            raise
+        if set_aside:
+            if os.path.exists(dict_out):
+                os.remove(set_aside)
+                logger.info(f"Made {os.path.basename(dict_out)} again from scratch (--overwrite).")
+            else:
+                os.replace(set_aside, dict_out)
+                logger.warning(f"No term was found; {os.path.basename(dict_out)} is left as it was.")
     elif command == "translate":
-        slides = _select_slides(sorted(_slides_from_workspace(workspace_dir)),
-                                effective.get("slides"), parser)
+        slides = _select_slides(sorted(_slides_from_workspace(ws)), effective.get("slides"), parser)
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
-        if not step_translate_notes(workspace_dir, slides, effective["in_lang"], effective["out_lang"],
-                                    dictionary=dictionaries, overwrite=effective["retranslate"],
+        if not step_translate_notes(ws, slides, effective["in_lang"], effective["out_lang"],
+                                    dictionary=dictionaries, overwrite=effective["overwrite"],
+                                    update=effective["update"],
                                     model=effective["translate_model"], device=effective["translate_device"]):
-            parser.error(f"no {effective['in_lang']} text was found in "
-                         f"{os.path.basename(original_file_input or input_path)}")
+            parser.error(f"no {effective['in_lang']} text was found in workspace: {ws}")
     elif command == "synthesize":
-        slides = _select_slides(_text_slides(workspace_dir, effective["in_lang"]),
-                                effective.get("slides"), parser)
+        slides = _select_slides(_text_slides(ws, effective["in_lang"]), effective.get("slides"), parser)
         if not slides:
-            parser.error(f"no {effective['in_lang']} text was found in workspace: {workspace_dir}")
+            parser.error(f"no {effective['in_lang']} text was found in workspace: {ws}")
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         letter_map_data = load_letter_map(effective.get("letter_map"))
         if effective["engine"] == "gpt_sovits":
@@ -2911,160 +3204,252 @@ def main(argv=None):
                 requests.get(f"{base_url}/set_sovits_weights", params={"weights_path": config_model["sovits"]}, timeout=300)
             except requests.RequestException as e:
                 parser.error(f"Could not reach the GPT-SoVITS API server at {effective['api_url']}: {e}")
-        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        model_label = _model_label(effective)
+        started = time.time() - 1
         if effective["engine"] == "qwen3":
-            step_generate_audio_qwen3(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
+            step_generate_audio_qwen3(ws, slides, effective["in_lang"], effective["ref_wav"],
                                       effective["ref_text"], dictionaries, model_label,
                                       effective["qwen3_model_size"], effective["qwen3_device"],
                                       enable_drc=effective["enable_drc"], drc_threshold=effective["drc_threshold"],
                                       drc_ratio=effective["drc_ratio"], letter_map=letter_map_data)
         else:
-            step_generate_audio(workspace_dir, slides, effective["in_lang"], effective["ref_wav"],
+            step_generate_audio(ws, slides, effective["in_lang"], effective["ref_wav"],
                                 effective["ref_text"], effective["ref_lang"], effective["api_url"],
                                 dictionaries, model_label, enable_drc=effective["enable_drc"],
                                 drc_threshold=effective["drc_threshold"], drc_ratio=effective["drc_ratio"],
                                 letter_map=letter_map_data)
+        made = record_audio_sources(ws, slides, effective["in_lang"], model_label,
+                                    effective.get("dict_file"), started)
+        missing = [n for n in slides if n not in made]
+        if missing:
+            logger.warning("No audio was made for slide(s): " + ", ".join(map(str, missing)) + ".")
     elif command == "verify":
-        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
+        model_label = _model_label(effective)
         slides = _select_slides(
-            [slide for slide in _text_slides(workspace_dir, effective["in_lang"])
-             if os.path.exists(os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label)))],
+            [slide for slide in _text_slides(ws, effective["in_lang"])
+             if os.path.exists(os.path.join(ws, audio_filename(slide, effective["in_lang"], model_label)))],
             effective.get("slides"), parser)
         if not slides:
-            available = _audio_model_labels(workspace_dir, effective["in_lang"])
+            available = _audio_model_labels(ws, effective["in_lang"])
             parser.error(f"verify found no {effective['in_lang']} audio for model '{model_label}'. "
                          + (f"Available model labels: {', '.join(available)}." if available else ""))
-        step_verify_audio(workspace_dir, slides, effective["in_lang"], model_label,
+        for n in slides:
+            if audio_is_older_than_text(ws, n, effective["in_lang"], model_label):
+                logger.warning(f"Slide #{n}: {text_filename(n, effective['in_lang'])} was edited after its audio "
+                               f"was made; the check compares the audio with the text it was made from.")
+        step_verify_audio(ws, slides, effective["in_lang"], model_label,
                           effective["asr_model"], effective["asr_device"], effective["verify_threshold"],
                           effective["cer_threshold"], max_difference=effective["max_difference"] or None,
                           min_difference=effective["min_difference"])
     elif command == "pack":
-        prs = Presentation(input_path)
+        out = os.path.abspath(args.out_deck)
+        if not out.lower().endswith(".pptx"):
+            parser.error(f"pack OUT must be a .pptx file name: {args.out_deck}")
+        if out == deck or (os.path.exists(out) and os.path.samefile(out, deck)):
+            parser.error("pack OUT must differ from DECK (DECK itself is never changed)")
+        if os.path.exists(out) and not (effective["update"] or effective["overwrite"]):
+            parser.error(f"{args.out_deck} already exists. Add --update or --overwrite to replace it.")
+        prs = Presentation(deck)
         slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
-        model_label = effective["model"] if effective["engine"] == "gpt_sovits" else f"qwen3-{effective['qwen3_model_size']}"
-        targets = resolve_targets(effective.get("target"))
-        audio_paths = [os.path.join(workspace_dir, audio_filename(s, effective["in_lang"], model_label))
-                       for s in slides]
-        if "audio" in targets and not any(os.path.exists(p) for p in audio_paths):
-            available = _audio_model_labels(workspace_dir, effective["in_lang"])
-            suffix = f" Available model labels: {', '.join(available)}." if available else " No matching audio files exist."
-            parser.error(f"pack found no {effective['in_lang']} audio for model '{model_label}'."
-                         f" Expected {os.path.basename(audio_paths[0]) if audio_paths else 'slide_N_<lang>.<model>.m4a'}.{suffix}")
-        output = os.path.abspath(effective["out"])
-        # pack uses the narration language as its input-data language.
-        step_pack_pptx(input_path, output, workspace_dir, slides, effective["in_lang"], model_label,
-                       source_lang="auto", targets=targets, update=effective.get("update", False),
-                       forceupdate=effective.get("forceupdate", False),
+        model_label = _model_label(effective)
+        targets = resolve_targets(effective.get("data_type"))
+        if "audio" in targets:
+            if not audio_lang:
+                logger.warning("No audio was found in this workspace; only the texts are written.")
+            elif not any(os.path.exists(os.path.join(ws, audio_filename(s, audio_lang, model_label)))
+                         for s in slides):
+                available = _audio_model_labels(ws, audio_lang)
+                logger.warning(f"No {audio_lang} audio for model '{model_label}' was found"
+                               + (f" (available model labels: {', '.join(available)})" if available else "")
+                               + "; no audio is written.")
+        step_pack_pptx(deck, out, ws, slides, effective.get("in_lang"), model_label,
+                       targets=targets, update=effective["update"], overwrite=effective["overwrite"],
+                       audio_lang=audio_lang,
                        remove_recorded=RECORDED_CHOICES[effective["remove_recorded"]],
                        icon_outside=not effective["keep_audio_icon"],
                        pause_ms=int(round(effective["slide_pause"] * 1000)))
 
-    if command in {"scan", "translate", "synthesize", "verify"} and '"'"'file_workspace_tmp'"'"' in locals() and file_workspace_tmp:
-        _sync_file_workspace(file_workspace_tmp, original_file_input, os.path.basename(original_file_input))
-        shutil.rmtree(file_workspace_tmp, ignore_errors=True)
+    written = _files_written(ws, before)
+    _suggest_next(command, args, effective, ws, deck=deck, out=out, dict_out=dict_out)
+    _report(command, ws, written, out=out, dict_out=dict_out)
+    _record_run(command, ws, effective, config_path, deck=deck, out=out, dict_out=dict_out, written=written)
 
-    # Record the input as it stands after the run. translate and synthesize write their
-    # results into the directory they read, so recording the state from before the run
-    # would make the next reuse fail on this run's own output.
-    try:
-        input_snapshot = _input_snapshot(input_path, command)
-    except RuntimeError:
-        pass
-    input_snapshot = _relativize_snapshot(input_snapshot, workspace_dir)
-    extra = {}
-    if workspace_dir:
-        extra["workspace"] = workspace_dir
-        # pack may take the workspace from the previous extract rather than from
-        # --workspace; record what was actually read so the choice is not implicit.
-        if command == "pack":
+
+LOG_FILE = "pptx_narrator.log"
+_RECORD_FILES = {STATE_FILE, RESOLVED_CONFIG_FILE, ".pptx_narrator_history.jsonl", LOG_FILE}
+
+
+def _open_workspace_log(ws, argv):
+    """Everything this run logs also goes to the log file of the workspace."""
+    handler = logging.FileHandler(os.path.join(ws, LOG_FILE), encoding="utf-8")
+    handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    words = sys.argv[1:] if argv is None else argv
+    logger.info("==== pptx-narrator " + " ".join(shlex.quote(w) for w in words) + f" (version {__version__})")
+    return handler
+
+
+def _say(text):
+    """Text for the reader (not a log line): to stderr, and into the log file."""
+    print(text, file=sys.stderr)
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler):
+            h.stream.write(text + "\n")
+            h.flush()
+
+
+def _workspace_files(ws):
+    out = {}
+    for name in os.listdir(ws):
+        path = os.path.join(ws, name)
+        if os.path.isfile(path) and name not in _RECORD_FILES:
+            st = os.stat(path)
+            out[name] = (st.st_mtime_ns, st.st_size)
+    return out
+
+
+def _files_written(ws, before):
+    after = _workspace_files(ws)
+    return {"created": sorted(n for n in after if n not in before),
+            "changed": sorted(n for n in after if n in before and after[n] != before[n]),
+            "removed": sorted(n for n in before if n not in after)}
+
+
+def _q(path):
+    return shlex.quote(path)
+
+
+def _model_options(effective):
+    if effective.get("engine") == "gpt_sovits":
+        return f" --engine gpt_sovits --model {effective['model']}"
+    return f" --engine qwen3 --qwen3-model-size {effective.get('qwen3_model_size', '1.7B')}"
+
+
+def _suggest_next(command, args, effective, ws, deck=None, out=None, dict_out=None):
+    """What can be run next, ready to copy, with the values of this run written out."""
+    w = "pptx-narrator " + _q(args.workspace)
+    lang = effective.get("out_lang") if command == "translate" else effective.get("in_lang")
+    langs = [lang] if isinstance(lang, str) and lang else (
+        lang if isinstance(lang, list) and lang else sorted({l for n in _slides_from_workspace(ws)
+                                                             for l in _text_langs_of_slide(ws, n)}))
+    lines = []
+    for l in langs:
+        if command in {"extract", "translate"}:
+            lines.append(f'{w} scan "dictionary_{l}.csv" --lang {l}'
+                         + (" --append" if os.path.exists(f"dictionary_{l}.csv") else ""))
+            lines.append(f'{w} synthesize --lang {l} --ref-wav "ref.wav" --ref-text "ref.txt"')
+        elif command == "scan":
+            lines.append(f"{w} synthesize --lang {l} --dict-file {_q(args.dictionary)} "
+                         f'--ref-wav "ref.wav" --ref-text "ref.txt"')
+        elif command == "synthesize":
+            lines.append(f"{w} verify --lang {l}{_model_options(effective)}")
+            lines.append(f'{w} pack "deck.pptx" "narrated.pptx" --lang {l}{_model_options(effective)}')
+        elif command == "verify":
+            lines.append(f'{w} pack "deck.pptx" "narrated.pptx" --lang {l}{_model_options(effective)}')
+    if not lines:
+        return
+    _say("\nNext, for example (replace the names in quotes with your own):")
+    for line in lines:
+        _say("  " + line)
+
+
+def _report(command, ws, written, out=None, dict_out=None):
+    """What this run did, as the last thing it says."""
+    _say(f"\nReport of {command} (workspace {ws}):")
+    for key, label in (("created", "created"), ("changed", "rewritten"), ("removed", "removed")):
+        if written[key]:
+            _say(f"  {label} in the workspace: " + ", ".join(written[key]))
+    if not any(written.values()):
+        _say("  nothing was written in the workspace")
+    if dict_out:
+        _say(f"  dictionary: {dict_out}")
+    if out:
+        _say(f"  deck written: {out}")
+    _say(f"  log: {os.path.join(ws, LOG_FILE)}")
+
+
+def show_history(ws, dates=False):
+    """List the commands run in a workspace, from its history file."""
+    path = os.path.join(ws, ".pptx_narrator_history.jsonl")
+    if not os.path.exists(path):
+        print(f"No command has been recorded in {ws}.")
+        return
+    with open(path, encoding="utf-8") as f:
+        for k, line in enumerate(f, 1):
             try:
-                extra["workspace_snapshot"] = _input_snapshot(workspace_dir, "verify")
-            except RuntimeError:
-                pass
-    _record_input(state, command, input_snapshot, extra)
-    state["commands"][command]["resolved_config"] = effective
-    state["commands"][command]["software_version"] = __version__
-    state["commands"][command]["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    if command == "synthesize":
-        model_label = (effective["model"] if effective["engine"] == "gpt_sovits"
-                       else f"qwen3-{effective['qwen3_model_size']}")
-        state["commands"][command]["audio_files"] = [
-            os.path.basename(path) for path in sorted(
-                os.path.join(workspace_dir, audio_filename(slide, effective["in_lang"], model_label))
-                for slide in _slides_from_workspace(workspace_dir)
-            ) if os.path.exists(path)
-        ]
-    state_dir = workspace_hint or workspace_dir
-    _save_state(state, _workspace_path(state_dir, STATE_FILE))
+                e = json.loads(line)
+            except ValueError:
+                continue
+            eff = e.get("effective", {})
+            parts = [e.get("command", "?")]
+            for key in ("deck", "dictionary", "out"):
+                if e.get("paths", {}).get(key):
+                    parts.append(e["paths"][key])
+            for key, flag in (("in_lang", "--in-lang"), ("out_lang", "--out-lang")):
+                if eff.get(key):
+                    v = eff[key]
+                    parts.append(f"{flag} {','.join(v) if isinstance(v, list) else v}")
+            if eff.get("slides"):
+                parts.append(f"--slides {eff['slides']}")
+            files = e.get("written", {})
+            n_files = len(files.get("created", [])) + len(files.get("changed", []))
+            when = (e.get("generated_at", "")[:16].replace("T", " ") + "  ") if dates else ""
+            print(f"{k:3d}  {when}{' '.join(parts)}" + (f"  ({n_files} file(s) written)" if files else ""))
 
-    # Everything inside the workspace is recorded relative to it, so that the
-    # workspace can be moved or copied without invalidating its own record.
-    rel_snapshot = _relativize_snapshot(input_snapshot, state_dir)
+
+def _record_run(command, ws, effective, config_path, deck=None, out=None, dict_out=None, written=None):
+    """Record what was run in the workspace.
+
+    Everything inside the workspace is recorded relative to it, so that the
+    workspace can be moved or copied without invalidating its own record;
+    anything outside it keeps its absolute path, because nothing else identifies it.
+    """
+    paths = {key: _rel_to_workspace(path, ws)
+             for key, path in (("deck", deck), ("out", out), ("dictionary", dict_out)) if path}
+    input_path = deck if command in {"extract", "pack"} else ws
+    try:
+        snapshot = _input_snapshot(input_path, command)
+    except RuntimeError:
+        snapshot = {"path": input_path, "kind": "file" if os.path.isfile(input_path) else "directory"}
+    rel_snapshot = _relativize_snapshot(snapshot, ws)
+    recorded = _record_effective(effective, ws)
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    # The state file (.pptx_narrator_state.json) let the next command leave out its
+    # arguments; nothing is carried over between runs any more, so it is no longer
+    # written. The history and the log of the workspace record what was run.
+    # state = _load_state(_workspace_path(ws, STATE_FILE))
+    # _record_input(state, command, rel_snapshot, {"workspace": ".", "paths": paths})
+    # ... resolved_config, software_version, generated_at, audio_files ...
+    # _save_state(state, _workspace_path(ws, STATE_FILE))
+
     metadata = {
         "software_version": __version__,
-        "generated_at": state["commands"][command]["generated_at"],
+        "generated_at": generated_at,
         "command": command,
-        "workspace": os.path.abspath(state_dir) if state_dir else "",
+        "workspace": ".",
+        "workspace_at_run": ws,
         "paths_relative_to": "workspace",
-        "config_file": _rel_to_workspace(config_path, state_dir) if config_path else "",
+        "config_file": _rel_to_workspace(config_path, ws) if config_path else "",
         "input_path": rel_snapshot.get("path", ""),
         "input_kind": rel_snapshot.get("kind", ""),
     }
+    metadata.update({f"{key}_path": value for key, value in paths.items()})
     if rel_snapshot.get("kind") == "file":
         metadata["input_sha256"] = rel_snapshot.get("sha256", "")
     else:
         metadata["input_files_json"] = json.dumps(rel_snapshot.get("files", []), ensure_ascii=False, sort_keys=True)
-    resolved = {"metadata": metadata, command: effective}
-    _save_resolved_config(resolved, _workspace_path(state_dir, RESOLVED_CONFIG_FILE))
-    _append_history(state_dir, {
+    _save_resolved_config({"metadata": metadata, command: recorded}, _workspace_path(ws, RESOLVED_CONFIG_FILE))
+    _append_history(ws, {
         "command": command,
-        "generated_at": metadata["generated_at"],
+        "generated_at": generated_at,
+        "workspace_at_run": ws,
+        "paths": paths,
         "input": rel_snapshot,
-        "effective": effective,
+        "effective": recorded,
+        "written": written or {},
         "status": "success",
     })
-
-
-def _prepare_file_workspace(command, input_path, in_lang=None):
-    """Create an isolated one-file workspace so file INPUT never processes neighbors."""
-    tmp = tempfile.mkdtemp(prefix="pptx_narrator_")
-    name = os.path.basename(input_path)
-    shutil.copy2(input_path, os.path.join(tmp, name))
-
-    # Commands that need a paired artifact (verify) get only the corresponding
-    # slide/model files from the original directory. Translation also gets an
-    # existing target file and manifest so its normal overwrite/skip semantics
-    # are preserved.
-    if command == "verify":
-        m = re.match(r"^slide_(\d+)(?:_[^.]+)?\.[^.]+$", name)
-        if m:
-            prefix = f"slide_{m.group(1)}_"
-            for sibling in os.listdir(os.path.dirname(input_path)):
-                if sibling.startswith(prefix) and os.path.isfile(os.path.join(os.path.dirname(input_path), sibling)):
-                    if sibling != name:
-                        shutil.copy2(os.path.join(os.path.dirname(input_path), sibling), os.path.join(tmp, sibling))
-    elif command == "translate":
-        m = _TEXT_FILE_RE.match(name)
-        if m:
-            prefix = f"slide_{m.group(1)}_"
-            for sibling in os.listdir(os.path.dirname(input_path)):
-                if sibling.startswith(prefix) and sibling != name and os.path.isfile(os.path.join(os.path.dirname(input_path), sibling)):
-                    shutil.copy2(os.path.join(os.path.dirname(input_path), sibling), os.path.join(tmp, sibling))
-        manifest = os.path.join(os.path.dirname(input_path), TRANSLATION_MANIFEST)
-        if os.path.exists(manifest):
-            shutil.copy2(manifest, os.path.join(tmp, TRANSLATION_MANIFEST))
-    return tmp
-
-
-def _sync_file_workspace(tmp, original_path, original_input_name):
-    """Copy generated artifacts from an isolated file workspace back beside INPUT."""
-    dest_dir = os.path.dirname(original_path) or "."
-    for name in os.listdir(tmp):
-        if name == original_input_name:
-            continue
-        src = os.path.join(tmp, name)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(dest_dir, name))
 
 
 def _slides_from_workspace(workspace_dir):

@@ -3,7 +3,7 @@
 Run from the repository root:  python tests/smoke_test.py
 Requires: python-pptx, pydub (+ FFmpeg), numpy, soundfile, py3langid.
 """
-import os, sys, types, tempfile, csv, zipfile, re, io, contextlib, argparse
+import os, sys, types, tempfile, csv, zipfile, re, io, contextlib, argparse, json, shutil
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import pptx_narrator as pn
 from pptx import Presentation
@@ -120,7 +120,27 @@ ok(read(os.path.join(ws, "slide_1_de.txt")).startswith("[ja->de]") and read(os.p
    and read(os.path.join(ws, "slide_3_de.txt")).startswith("[ko->de]"), "translate ja/en/ko -> de")
 write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話です。")
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T)
-ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")), "existing translation kept without --retranslate")
+ok("Basenpaare" not in read(os.path.join(ws, "slide_1_de.txt")),
+   "an existing translation whose source has changed is kept without --update or --overwrite")
+n_calls = len(FakeTr.calls)
+write(os.path.join(ws, "slide_2_de.txt"), "von Hand verbessert")
+write(os.path.join(ws, "slide_2_en.txt"), "The source has changed.")
+write(os.path.join(ws, "slide_3_ko.txt"), "원문이 바뀌었습니다.")
+pn.step_translate_notes(ws, [1, 2, 3], "auto", "de", update=True)
+ok(read(os.path.join(ws, "slide_1_de.txt")).startswith("[ja->de] 塩基対")
+   and read(os.path.join(ws, "slide_2_de.txt")) == "von Hand verbessert"
+   and read(os.path.join(ws, "slide_3_de.txt")).startswith("[ko->de] 원문")
+   and len(FakeTr.calls) == n_calls + 2,
+   "--update translates again where the source changed, but keeps a translation edited by hand")
+n_calls = len(FakeTr.calls)
+pn.step_translate_notes(ws, [1, 3], "auto", "de", update=True)
+ok(len(FakeTr.calls) == n_calls, "--update leaves a translation that is up to date with its source")
+write(os.path.join(ws, "slide_4_ja.txt"), "新しいスライド")
+write(os.path.join(ws, "slide_4_de.txt"), "von Hand geschrieben")
+pn.step_translate_notes(ws, [4], "auto", "de", update=True)
+ok(read(os.path.join(ws, "slide_4_de.txt")) == "von Hand geschrieben",
+   "--update keeps a text that translate did not make")
+os.remove(os.path.join(ws, "slide_4_ja.txt")); os.remove(os.path.join(ws, "slide_4_de.txt"))
 pn.step_translate_notes(ws, [1], "auto", "de", dictionary=T, overwrite=True)
 ok(FakeTr.calls[-1] == "塩基対の話です。" and ("塩基対", "Basenpaare") in (FakeTr.glossaries[-1] or [])
    and read(os.path.join(ws, "slide_1_ja.txt")) == "塩基対の話です。",
@@ -289,14 +309,19 @@ z_out.close()
 for n, dur in [(1, 1800), (2, 2500), (3, 3200)]:
     AudioSegment.silent(duration=dur).export(os.path.join(ws, f"slide_{n}_de.v4.m4a"), format="ipod")
 out_deck = os.path.join(d, "out.pptx")
-pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4", source_lang="auto")
+orig_note1 = pn._slide_note_raw(Presentation(packed).slides[0])
+pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4")
 notes = Presentation(out_deck).slides[0].notes_slide.notes_text_frame.text
-info = pn.parse_structured_note(notes)
-ok(notes.startswith("=== pptx-narrator: narration [de] from [ja] #") and info and info["narration_lang"] == "de"
-   and info["narration_text"].startswith("[ja->de]") and info["source_lang"] == "ja" and info["source_text"] == "塩基対の話です。"
-   and info["fingerprint"] == pn.text_fingerprint("塩基対の話です。"), "write-back: marked narration part followed by the original note")
+secs = [s_ for s_ in pn.split_note_sections(notes.split("\n")) if s_["lang"]]
+ok([s_["lang"] for s_ in secs] == ["ja", "de"] and notes.startswith("=== pptx-narrator: [ja] ===\n")
+   and pn._section_text(secs[0]["lines"]) == orig_note1
+   and pn._section_text(secs[1]["lines"]).startswith("[ja->de]")
+   and secs[1]["info"]["source_lang"] == "ja"
+   and secs[1]["info"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"),
+   "write-back: the note keeps its text under its own heading, and the new language is added under another")
 notes2 = Presentation(out_deck).slides[1].notes_slide.notes_text_frame.text
-ok(pn.parse_structured_note(notes2)["source_lang"] == "en", "write-back for an English-note slide")
+ok("=== pptx-narrator: [en] ===" in notes2 and "=== pptx-narrator: [de] translated from [en]" in notes2,
+   "write-back for an English-note slide: no language is treated specially")
 
 zo = zipfile.ZipFile(out_deck)
 names = zo.namelist()
@@ -358,8 +383,8 @@ ok(pn.text_fingerprint("a\r\nb  \n") == pn.text_fingerprint("a\nb"), "fingerprin
 # extract the packed deck again: source part is extracted, unchanged translation restored
 ws4 = os.path.join(d, "ws4"); os.makedirs(ws4)
 pn.step_extract_notes(out_deck, ws4, [1, 2, 3], "auto")
-ok(read(os.path.join(ws4, "slide_1_ja.txt")) == "塩基対の話です。" and read(os.path.join(ws4, "slide_1_de.txt")).startswith("[ja->de]"),
-   "re-extraction: source part + restored translation")
+ok(read(os.path.join(ws4, "slide_1_ja.txt")) == orig_note1 and read(os.path.join(ws4, "slide_1_de.txt")).startswith("[ja->de]"),
+   "re-extraction: one text per language of the note")
 ok(pn._load_manifest(ws4)["1"]["de"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"), "manifest written on restore")
 FakeTr.calls.clear()
 pn.step_translate_notes(ws4, [1], "auto", "de", dictionary=T)
@@ -368,15 +393,25 @@ ok(FakeTr.calls == [], "restored translation is not translated again")
 # edit the source part inside PowerPoint -> narration is stale
 prs_e = Presentation(out_deck)
 tf = prs_e.slides[0].notes_slide.notes_text_frame
-tf.text = tf.text.replace("塩基対の話です。", "塩基対とRNAの話です。")
+tf.text = tf.text.replace(orig_note1, "塩基対とRNAの話です。")
 edited = os.path.join(d, "edited.pptx"); prs_e.save(edited)
 ws5 = os.path.join(d, "ws5"); os.makedirs(ws5)
 write(os.path.join(ws5, "slide_1_de.txt"), "old narration in the workspace")
+logs.clear()
 pn.step_extract_notes(edited, ws5, [1], "auto")
-ok(read(os.path.join(ws5, "slide_1_ja.txt")) == "塩基対とRNAの話です。" and not os.path.exists(os.path.join(ws5, "slide_1_de.txt"))
-   and read(os.path.join(ws5, "slide_1_de.stale.txt")).startswith("[ja->de]"), "edited source -> stale narration set aside")
-pn.step_translate_notes(ws5, [1], "auto", "de", dictionary=T)
-ok("RNA" in read(os.path.join(ws5, "slide_1_de.txt")), "stale narration is translated again")
+ok(read(os.path.join(ws5, "slide_1_de.txt")) == "old narration in the workspace"
+   and any("slide_1_de.txt differs from the note in the deck and was edited in the workspace" in m for m in logs),
+   "extract keeps a text of the workspace that it did not write, with a warning")
+pn.step_extract_notes(edited, ws5, [1], "auto", overwrite=True)
+ok(read(os.path.join(ws5, "slide_1_de.txt")).startswith("[ja->de]") and not os.path.exists(os.path.join(ws5, "slide_1_de.stale.txt")),
+   "--overwrite replaces it with the note; nothing is set aside")
+pn.step_translate_notes(ws5, [1], "auto", "de", dictionary=T, update=True)
+ok("RNA" in read(os.path.join(ws5, "slide_1_de.txt")), "a translation whose source changed is translated again with --update")
+write(os.path.join(ws5, "slide_1_de.txt"), "von Hand")
+logs.clear()
+pn.step_extract_notes(edited, ws5, [1], "auto", update=True)
+ok(read(os.path.join(ws5, "slide_1_de.txt")) == "von Hand",
+   "--update of extract keeps a text edited in the workspace")
 
 # spoken-form narration blocks are not restored as translations
 spoken_note = pn.compose_structured_note("de", "Boten-RNA", "ja", "mRNAの話", spoken=True)
@@ -389,10 +424,11 @@ ok(sorted(os.listdir(ws6)) == ["note_baseline.json", "slide_1_ja.txt"], "spoken 
 # pack warns when the translation is older than the source note
 logs.clear()
 write(os.path.join(ws, "slide_1_ja.txt"), "塩基対の話を変更しました。")
-pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4", source_lang="auto")
-note_old = pn.parse_structured_note(Presentation(os.path.join(d, "out2.pptx")).slides[0].notes_slide.notes_text_frame.text)
-ok(any("older version of the source note" in m for m in logs) and note_old["fingerprint"] != pn.text_fingerprint(note_old["source_text"]),
-   "stale translation flagged at pack time and marked by its original fingerprint")
+pn.step_pack_pptx(packed, os.path.join(d, "out2.pptx"), ws, [1], "de", "v4")
+note_old = Presentation(os.path.join(d, "out2.pptx")).slides[0].notes_slide.notes_text_frame.text
+ok(any("was translated from an older version of slide_1_ja.txt" in m for m in logs)
+   and "#" + pn.text_fingerprint("塩基対の話です。") in note_old,
+   "stale translation flagged at pack time and marked by the fingerprint of its source")
 
 # ---------------------------------------------------------------- struck-through text in notes
 prs12 = Presentation()
@@ -414,6 +450,32 @@ _, written12, _ = pn.step_pack_pptx(deck12, os.path.join(d, "out12.pptx"), ws12,
                                     update=True)
 ok(written12 == [] and "RNA" in Presentation(os.path.join(d, "out12.pptx")).slides[0].notes_slide.notes_text_frame.text,
    "an unedited note with struck-through text is not rewritten (the strikethrough stays in the deck)")
+_, written12, _ = pn.step_pack_pptx(deck12, os.path.join(d, "out12.pptx"), ws12, [1], "ja", "qwen3-1.7B")
+ok(written12 == [], "the same text is not written again even without --update")
+write(os.path.join(ws12, "slide_1_en.txt"), "This is the textbook's DNA primase.")
+_, written12, _ = pn.step_pack_pptx(deck12, os.path.join(d, "out12b.pptx"), ws12, [1], None, "qwen3-1.7B",
+                                    targets={"text"})
+body12 = Presentation(os.path.join(d, "out12b.pptx")).slides[0].notes_slide.notes_text_frame._txBody
+from lxml import etree as _et; xml12 = _et.tostring(body12, encoding="unicode")
+secs12 = [s_ for s_ in pn.split_note_sections(Presentation(os.path.join(d, "out12b.pptx")).slides[0].notes_slide.notes_text_frame.text.split("\n")) if s_["lang"]]
+ok(written12 == [1] and [s_["lang"] for s_ in secs12] == ["ja", "en"]
+   and 'strike="sngStrike"' in xml12 and 'strike="dblStrike"' in xml12,
+   "adding a language keeps the other part of the note as it was, formatting and struck-through text included")
+ws12b = os.path.join(d, "ws12b"); os.makedirs(ws12b)
+pn.step_extract_notes(os.path.join(d, "out12b.pptx"), ws12b, [1], "auto")
+ok(read(os.path.join(ws12b, "slide_1_ja.txt")) == read(os.path.join(ws12, "slide_1_ja.txt"))
+   and read(os.path.join(ws12b, "slide_1_en.txt")) == "This is the textbook's DNA primase.",
+   "such a note is extracted again into the same texts")
+ok(pn.record_audio_sources(ws12, [1], "ja", "qwen3-1.7B", None, 0) == [1]
+   and pn.audio_is_older_than_text(ws12, 1, "ja", "qwen3-1.7B") is False
+   and pn.audio_is_older_than_text(ws12, 1, "en", "qwen3-1.7B") is None,
+   "synthesize records the text each audio was made from")
+write(os.path.join(ws12, "slide_1_ja.txt"), read(os.path.join(ws12, "slide_1_ja.txt")) + "追加の文です。")
+logs.clear()
+pn.step_pack_pptx(deck12, os.path.join(d, "out12c.pptx"), ws12, [1], "ja", "qwen3-1.7B", targets={"audio"})
+ok(pn.audio_is_older_than_text(ws12, 1, "ja", "qwen3-1.7B") is True
+   and any("was edited after slide_1_ja.qwen3-1.7B.m4a was made" in m for m in logs),
+   "pack says when a text was edited after its audio was made")
 
 # ---------------------------------------------------------------- pack: notes and hand edits
 def note_of(path, n=1):
@@ -436,9 +498,14 @@ write(os.path.join(ws10, "slide_1_ja.txt"), "今日はDNAの構造の話です�
 out10 = os.path.join(d, "out10.pptx")
 logs.clear()
 _, written10, mismatched10 = pn.step_pack_pptx(deck10, out10, ws10, [1, 2], "ja", "qwen3-1.7B")
+ok(note_of(out10, 1) == "今日はDNAの話です。" and written10 == [] and mismatched10 == [1]
+   and any("slide_1_ja.txt was edited in the workspace" in m for m in logs),
+   "a text edited in the workspace is not written without --update or --overwrite, with a warning")
+logs.clear()
+_, written10, mismatched10 = pn.step_pack_pptx(deck10, out10, ws10, [1, 2], "ja", "qwen3-1.7B", update=True)
 ok(note_of(out10, 1) == "今日はDNAの構造の話です。" and note_of(out10, 2) == "今日はRNAの話です。"
    and written10 == [1] and mismatched10 == [] and not any("WARNING" in m for m in logs if "Slide #1" in m),
-   "text edited in the workspace is written into the note (the deck note was not touched)")
+   "with --update, text edited in the workspace is written into the note (the deck note was not touched)")
 
 # target audio: the note is left, and the mismatch is reported
 logs.clear()
@@ -446,7 +513,7 @@ _, written, mismatched = pn.step_pack_pptx(deck10, os.path.join(d, "out10a.pptx"
                                            targets={"audio"})
 ok(note_of(os.path.join(d, "out10a.pptx"), 1) == "今日はDNAの話です。" and written == [] and mismatched == [1]
    and any("Slide #1: the note in the deck differs" in m for m in logs),
-   "target audio leaves the notes and warns where they no longer match the narration")
+   "--data-type audio leaves the notes and warns where they no longer match the narration")
 
 # a note edited in the deck after extract is not overwritten ...
 prs10h = Presentation(out10)
@@ -458,17 +525,17 @@ _, written, mismatched = pn.step_pack_pptx(hand10, os.path.join(d, "out10b.pptx"
 ok(note_of(os.path.join(d, "out10b.pptx"), 1) == "手で直したノート" and written == [] and mismatched == [1]
    and any("Slide #1: the note was edited in the deck after extract" in m for m in logs),
    "a note edited in the deck is protected, with a warning")
-# ... unless --forceupdate
+# ... unless --overwrite (forceupdate=True)
 logs.clear()
 _, written, _ = pn.step_pack_pptx(hand10, os.path.join(d, "out10c.pptx"), ws10, [1], "ja", "qwen3-1.7B",
-                                  forceupdate=True)
+                                  overwrite=True)
 ok(note_of(os.path.join(d, "out10c.pptx"), 1) == "今日はDNAの二重らせんの話です。" and written == [1]
-   and any("overwriting it (--forceupdate)" in m for m in logs),
-   "--forceupdate overwrites it, with a warning")
+   and any("overwriting it (--overwrite)" in m for m in logs),
+   "--overwrite overwrites it, with a warning")
 # a note pack itself wrote is not mistaken for a hand edit
 write(os.path.join(ws10, "slide_1_ja.txt"), "今日はDNAの複製の話です。")
 _, written, _ = pn.step_pack_pptx(os.path.join(d, "out10c.pptx"), os.path.join(d, "out10d.pptx"), ws10, [1],
-                                  "ja", "qwen3-1.7B")
+                                  "ja", "qwen3-1.7B", update=True)
 ok(written == [1] and note_of(os.path.join(d, "out10d.pptx"), 1) == "今日はDNAの複製の話です。",
    "a note written by pack can be replaced by the next pack")
 
@@ -490,27 +557,27 @@ ok(pn.resolve_targets(None) == pn.resolve_targets("all") == {"audio", "text"}
    and pn.resolve_targets("text") == {"text"}, "pack target: omitted means all")
 
 # ---------------------------------------------------------------- command line
-# The CLI writes .pptx_narrator_state.json and .pptx_narrator_resolved.toml into the
-# working directory, and "no previous input" only holds where no state exists yet, so
-# this section runs in a directory of its own.
+# The command line is  pptx-narrator WS COMMAND [INPUT] [OUTPUT] [options].
+# This section runs in a directory of its own, so that nothing is written beside the tests.
 deck = os.path.abspath(deck)
 cli_cwd = os.path.join(d, "cli"); os.makedirs(cli_cwd); os.chdir(cli_cwd)
-# A workspace must exist, and hold text, for the commands that read one.
 os.makedirs(os.path.join(cli_cwd, "ws"))
 for _lang in ("ja", "de", "nl"):
     write(os.path.join(cli_cwd, "ws", f"slide_1_{_lang}.txt"), "text")
 parser = pn.build_parser()
-a = parser.parse_args(["translate", "ws", "--in_lang", "JA", "--out-lang", "zh_cn",
+a = parser.parse_args(["ws", "translate", "--in_lang", "JA", "--out-lang", "zh_cn",
                        "--dict-file", "a.csv", "--dict_file", "b.csv"])
-ok(a.command == "translate" and a.in_lang == "ja" and a.out_lang == "zh-CN"
+ok(a.workspace == "ws" and a.command == "translate" and a.in_lang == "ja" and a.out_lang == "zh-CN"
    and a.dict_file == ["a.csv", "b.csv"], "CLI normalization, aliases, repeatable --dict-file")
 
-ok([c for c in ("extract", "scan", "translate", "synthesize", "verify", "pack")
-    if parser.parse_args([c, deck] if c in ("extract", "pack") else [c, "ws"]).command != c] == [],
-   "every pipeline step is a command of its own")
-
-ok(parser.parse_args(["extract", deck]).input == deck
-   and parser.parse_args(["extract"]).input is None, "INPUT is positional and optional")
+positionals = {"extract": [deck], "scan": ["d.csv"], "pack": [deck, "o.pptx"]}
+ok([c for c in pn.COMMANDS if parser.parse_args(["ws", c] + positionals.get(c, [])).command != c] == [],
+   "every pipeline step is a command of its own, after the workspace")
+a = parser.parse_args(["ws", "pack", deck, "o.pptx", "--lang", "ja"])
+ok(a.deck == deck and a.out_deck == "o.pptx" and a.lang == "ja"
+   and parser.parse_args(["ws", "scan", "d.csv"]).dictionary == "d.csv"
+   and parser.parse_args(["ws", "extract", deck]).deck == deck,
+   "INPUT and OUTPUT are the files outside the workspace, given by position")
 
 def expect_error(argv, text):
     buf = io.StringIO()
@@ -521,86 +588,143 @@ def expect_error(argv, text):
         pass
     ok(text in buf.getvalue(), f"CLI error: {text}")
 
-expect_error(["synthesize", "ws", "--in-lang", "nl", "--engine", "qwen3",
+expect_error(["ws", "extract"], "DECK")
+expect_error(["ws", "pack", deck], "OUT")
+expect_error(["ws", "synthesize", "--lang", "nl", "--engine", "qwen3",
               "--ref-wav", "a", "--ref-text", "b"], "Qwen3-TTS does not support 'nl'")
-expect_error(["synthesize", "ws", "--in-lang", "de", "--engine", "gpt_sovits",
+expect_error(["ws", "synthesize", "--lang", "de", "--engine", "gpt_sovits",
               "--ref-wav", "a", "--ref-text", "b"], "GPT-SoVITS does not support")
-expect_error(["translate", "ws", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
-expect_error(["scan", "ws"], "--in-lang")
-expect_error(["extract", deck, "--in-lang", "fr"], "no note in fr")
-expect_error(["scan", "--in-lang", "ja", "--dict-file", "d.csv"],
-             "requires --workspace")
+expect_error(["ws", "translate", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
+expect_error(["ws", "translate", "--lang", "de"], "translate requires different")
+expect_error(["ws", "translate", "--lang", "de", "--in-lang", "ja", "--out-lang", "en"],
+             "--lang cannot be combined with --in-lang or --out-lang")
+expect_error(["ws", "scan", "d.csv"], "scan requires --lang")
+expect_error(["ws_fr", "extract", deck, "--in-lang", "fr"], "no note in fr")
+expect_error(["no_such_ws", "scan", "d.csv", "--lang", "ja"], "workspace does not exist")
+expect_error(["extract", deck], "the workspace comes first and the command second")
+expect_error(["ws", "extrct", deck], "did you mean 'extract'")
+write(os.path.join(cli_cwd, "terms.csv"), "string,replacement,type\n")
+expect_error(["ws", "scan", "terms.csv", "--lang", "ja"], "already exists. Add --append")
+expect_error(["ws", "scan", "terms.csv", "--lang", "ja", "--append", "--overwrite"],
+             "--append and --overwrite cannot be combined")
+expect_error(["ws", "pack", deck, deck, "--lang", "ja"], "OUT must differ from DECK")
+shutil.copy(deck, os.path.join(cli_cwd, "made_before.pptx"))
+expect_error(["ws", "pack", deck, "made_before.pptx", "--lang", "ja", "--data-type", "text"],
+             "already exists. Add --update or --overwrite")
+expect_error(["ws", "pack", deck, "o.pptx", "--lang", "ja", "--update", "--overwrite"],
+             "--update and --overwrite cannot be combined")
 
 # built-in defaults -> configuration file -> command line
-args = parser.parse_args(["pack", deck])
+args = parser.parse_args(["ws", "pack", deck, "o.pptx"])
 eff = pn._merge_effective("pack", args, {}, parser)
-ok(eff["remove_recorded"] == "all" and eff["slide_pause"] == 1.0
+ok(eff["remove_recorded"] == "all" and eff["slide_pause"] == 1.0 and eff["data_type"] == "all"
    and pn.RECORDED_CHOICES["none"] == (), "built-in defaults are used when nothing else sets a value")
 eff = pn._merge_effective("pack", args, {"pack": {"slide_pause": 2.5}}, parser)
 ok(eff["slide_pause"] == 2.5, "the configuration file overrides the built-in default")
 eff = pn._merge_effective("pack", args, {"common": {"slide_pause": 3.5}}, parser)
 ok(eff["slide_pause"] == 3.5, "a [common] section applies to every command")
-args = parser.parse_args(["pack", deck, "--slide-pause", "0.5"])
+args = parser.parse_args(["ws", "pack", deck, "o.pptx", "--slide-pause", "0.5"])
 eff = pn._merge_effective("pack", args, {"pack": {"slide_pause": 2.5}}, parser)
 ok(eff["slide_pause"] == 0.5, "the command line overrides the configuration file")
-eff = pn._merge_effective("pack", parser.parse_args(["pack", deck, "--out", ""]),
-                          {"pack": {"out": "from_config.pptx"}}, parser)
-ok(eff["out"] is None, "an empty value on the command line takes a configured value back")
-ok(parser.parse_args(["pack", deck, "text"]).target == "text"
-   and parser.parse_args(["pack", deck]).target is None, "pack takes the target after the deck")
+eff = pn._merge_effective("translate", parser.parse_args(["ws", "translate", "--dict-file", ""]),
+                          {"translate": {"dict_file": ["from_config.csv"]}}, parser)
+ok(eff["dict_file"] is None, "an empty value on the command line takes a configured value back")
+eff = pn._merge_effective("pack", parser.parse_args(["ws", "pack", deck, "o.pptx"]),
+                          {"pack": {"out": "x.pptx", "forceupdate": True, "workspace": "w"}}, parser)
+ok("out" not in eff and "forceupdate" not in eff and "workspace" not in eff and eff["overwrite"] is False,
+   "configuration keys of earlier versions are set aside, not acted on")
+ok(parser.parse_args(["ws", "pack", deck, "o.pptx", "--data-type", "text"]).data_type == "text",
+   "pack takes what to write as --data-type")
 cfg_true = {"pack": {"update": True}}
-ok(pn._merge_effective("pack", parser.parse_args(["pack", deck]), cfg_true, parser)["update"] is True
-   and pn._merge_effective("pack", parser.parse_args(["pack", deck, "--no-update"]),
+ok(pn._merge_effective("pack", parser.parse_args(["ws", "pack", deck, "o.pptx"]), cfg_true, parser)["update"] is True
+   and pn._merge_effective("pack", parser.parse_args(["ws", "pack", deck, "o.pptx", "--no-update"]),
                            cfg_true, parser)["update"] is False,
    "--no-... takes back a switch set in the configuration file")
 ok(pn._normalize_config_keys({"a-b": {"c-d": 1}}) == {"a_b": {"c_d": 1}},
    "hyphenated keys in the configuration file are accepted")
-ok(parser.parse_args(["scan", "ws", "--config", "x.toml"]).config == "x.toml",
+ok(parser.parse_args(["ws", "scan", "d.csv", "--config", "x.toml"]).config == "x.toml",
    "--config may follow the command")
-# ---------------------------------------------- workspace state and inheritance
+
+# --lang is --in-lang (and --out-lang) in one
+def lang_of(argv, config=None):
+    a = parser.parse_args(argv)
+    return pn._resolve_lang(a.command, pn._merge_effective(a.command, a, config or {}, parser), a, parser)
+e = lang_of(["ws", "synthesize", "--lang", "ja"])
+ok(e["in_lang"] == "ja" and "lang" not in e, "--lang gives the language of a one-language command")
+e = lang_of(["ws", "translate", "--lang", "ja"])
+ok(e["in_lang"] == e["out_lang"] == "ja", "--lang sets --in-lang and --out-lang together")
+e = lang_of(["ws", "synthesize", "--in-lang", "ja"], {"synthesize": {"lang": "en"}})
+ok(e["in_lang"] == "ja", "--in-lang on the command line wins over lang in the configuration file")
+
+# ------------------------------------------------ no implicit carry-over between runs
+ok(not hasattr(pn, "_inherit_synthesis_settings") and not hasattr(pn, "_resolve_input"),
+   "nothing is carried over implicitly from an earlier run")
 wsi = os.path.join(cli_cwd, "wsi"); os.makedirs(wsi)
 write(os.path.join(wsi, "slide_1_ja.txt"), "\u30c6\u30b9\u30c8")
 AudioSegment.silent(duration=300).export(os.path.join(wsi, "slide_1_ja.qwen3-1.7B.m4a"), format="ipod")
 write(os.path.join(wsi, "slide_1_ja.qwen3-1.7B.spoken.txt"), "\u30c6\u30b9\u30c8")
 pn._save_state({"version": 1, "commands": {"synthesize": {
-    "resolved_config": {"in_lang": "ja", "engine": "qwen3", "qwen3_model_size": "1.7B",
-                        "model": "qwen3-1.7B"}}}}, pn._workspace_path(wsi, pn.STATE_FILE))
-st = pn._load_state(pn._workspace_path(wsi, pn.STATE_FILE))
-for cmd in ("verify", "pack"):
-    a = parser.parse_args([cmd, deck, "--workspace", wsi] if cmd == "pack" else [cmd, wsi])
-    eff = pn._inherit_synthesis_settings(cmd, pn._merge_effective(cmd, a, {}, parser), a, {}, st)
-    ok(eff["engine"] == "qwen3" and eff["qwen3_model_size"] == "1.7B",
-       f"{cmd} inherits the engine of the last synthesis in this workspace")
-a = parser.parse_args(["pack", deck, "--workspace", wsi, "--engine", "gpt_sovits"])
-eff = pn._inherit_synthesis_settings("pack", pn._merge_effective("pack", a, {}, parser), a, {}, st)
-ok(eff["engine"] == "gpt_sovits", "an explicit engine still wins over the workspace state")
-
-ok(os.path.exists(pn._workspace_path(wsi, pn.STATE_FILE))
-   and not os.path.exists(os.path.join(cli_cwd, pn.STATE_FILE)),
-   "execution state lives in the workspace, not in the current directory")
+    "resolved_config": {"in_lang": "ja", "engine": "gpt_sovits", "model": "v2ProPlus"}}}},
+    pn._workspace_path(wsi, pn.STATE_FILE))
+a = parser.parse_args(["wsi", "pack", deck, "o.pptx", "--lang", "ja"])
+ok(pn._merge_effective("pack", a, {}, parser)["engine"] == "qwen3",
+   "pack does not take over the engine of the last synthesis")
 
 AudioSegment.silent(duration=300).export(os.path.join(wsi, "slide_1_ja.v2ProPlus.m4a"), format="ipod")
 ok(pn._audio_model_labels(wsi, "ja") == ["qwen3-1.7B", "v2ProPlus"],
    "the audio of a workspace is reported by model label")
-expect_error(["pack", deck, "--workspace", wsi], "multiple audio model labels")
+expect_error(["wsi", "pack", deck, "o.pptx", "--lang", "ja"], "multiple audio model labels")
 
 wse = os.path.join(cli_cwd, "wse"); os.makedirs(wse)
 write(os.path.join(wse, "slide_1_ja.txt"), "\u30c6\u30b9\u30c8")
-expect_error(["pack", deck, "--workspace", wse, "--in-lang", "ja", "--engine", "qwen3"],
-             "found no ja audio")
+logs.clear()
+with contextlib.redirect_stderr(io.StringIO()):
+    pn.main(["wse", "pack", deck, "o2.pptx", "--lang", "ja", "--engine", "qwen3"])
+ok(os.path.exists(os.path.join(cli_cwd, "o2.pptx")) and any("No ja audio for model 'qwen3-1.7B'" in m for m in logs),
+   "pack without audio still writes the texts, and says the audio was not found")
+AudioSegment.silent(duration=300).export(os.path.join(wse, "slide_1_en.qwen3-1.7B.m4a"), format="ipod")
+AudioSegment.silent(duration=300).export(os.path.join(wse, "slide_1_ja.qwen3-1.7B.m4a"), format="ipod")
+expect_error(["wse", "pack", deck, "o3.pptx"], "audio of several languages is in this workspace (en, ja)")
+logs.clear()
+with contextlib.redirect_stderr(io.StringIO()):
+    pn.main(["wse", "pack", deck, "o3.pptx", "--data-type", "text"])
+ok(os.path.exists(os.path.join(cli_cwd, "o3.pptx")), "without --lang, the texts of every language can be written")
 
-expect_error(["scan", os.path.join(cli_cwd, "no_such_ws"), "--in-lang", "ja",
-              "--dict-file", "d.csv"], "workspace does not exist")
-expect_error(["verify", deck, "--workspace", wse, "--in-lang", "ja"],
-             "must be a workspace directory or one of its files")
-expect_error(["verify", os.path.join(wse, "slide_1_ja.txt"), "--workspace", cli_cwd,
-              "--in-lang", "ja"], "is not in --workspace")
-ok(pn._is_workspace_file("slide_4_ja.txt")
-   and pn._is_workspace_file("slide_4_ja.qwen3-1.7B.m4a")
-   and not pn._is_workspace_file("lecture.pptx"),
-   "a deck is not a workspace file")
+# the record of a run: in the workspace, with the paths inside it relative to it
+ws2 = os.path.join(cli_cwd, "ws2")
+said = io.StringIO()
+with contextlib.redirect_stderr(said):
+    pn.main(["ws2", "extract", deck, "--lang", "ja"])
+said = said.getvalue()
+ok("Next, for example" in said and 'pptx-narrator ws2 synthesize --lang ja --ref-wav "ref.wav"' in said
+   and said.index("Next, for example") < said.index("Report of extract")
+   and "created in the workspace: " in said and "slide_1_ja.txt" in said,
+   "a run ends with the commands that can come next and then a report of the files it wrote")
+log2 = read(os.path.join(ws2, pn.LOG_FILE))
+ok("==== pptx-narrator ws2 extract" in log2 and "note extracted to slide_1_ja.txt" in log2 and "Report of extract" in log2,
+   "what a run logs and reports is also kept in the log file of the workspace")
+hist, status = io.StringIO(), 0
+with contextlib.redirect_stdout(hist):
+    pn.main(["ws2", "history", "--dates"])
+ok("extract " + deck in hist.getvalue() and "--in-lang ja" in hist.getvalue()
+   and "file(s) written" in hist.getvalue(), "history lists the commands run in the workspace")
+ok(os.path.exists(os.path.join(ws2, ".pptx_narrator_history.jsonl"))
+   and not os.path.exists(os.path.join(cli_cwd, ".pptx_narrator_history.jsonl"))
+   and not os.path.exists(pn._workspace_path(ws2, pn.STATE_FILE)),
+   "the record of a run lives in the workspace, not in the current directory; no state file is written")
+with open(os.path.join(ws2, ".pptx_narrator_history.jsonl"), encoding="utf-8") as f:
+    last = json.loads(f.read().splitlines()[-1])
+resolved = read(os.path.join(ws2, pn.RESOLVED_CONFIG_FILE))
+ok(last["command"] == "extract" and last["paths"]["deck"] == deck and last["input"]["path"] == deck
+   and "slide_1_ja.txt" in last["written"]["created"]
+   and 'workspace = "."' in resolved and os.path.abspath(ws2) not in json.dumps(last["paths"]),
+   "the deck outside the workspace is recorded by its absolute path, the workspace as '.'")
+rec = pn._record_effective({"dict_file": [os.path.join(ws2, "d.csv"), "/abs/x.csv"],
+                            "ref_wav": os.path.join(ws2, "voice", "ref.wav"), "slides": "1-3"}, ws2)
+ok(rec["dict_file"] == ["d.csv", "/abs/x.csv"] and rec["ref_wav"] == os.path.join("voice", "ref.wav")
+   and rec["slides"] == "1-3", "path settings inside the workspace are recorded relative to it")
 
-ok(not hasattr(parser.parse_args(["pack", deck]), "use_spoken_notes")
+ok(not hasattr(parser.parse_args(["ws", "pack", deck, "o.pptx"]), "use_spoken_notes")
    and "--use-spoken-notes" not in open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
                                         encoding="utf-8").read(),
    "the spoken text is never written into the notes")
@@ -614,11 +738,6 @@ snap = {"kind": "directory", "path": "/w/ws",
 ok(pn._relativize_snapshot(snap, "/w/ws")["files"][0]["path"] == "slide_1_ja.txt",
    "the files of a directory record are relative too")
 
-ok(pn._suggest_command("verify", "lecture.pptx", "ws", "ja") == "pptx-narrator verify ws --in-lang ja",
-   "a deck given to a workspace command suggests the workspace")
-ok("extract" in (pn._suggest_command("verify", os.path.join(cli_cwd, "nowhere.pptx"), None, "ja") or ""),
-   "with no workspace in sight, extract is suggested first")
-
 ok(all("--slides" in [a.option_strings[0] for a in sp._actions if a.option_strings]
        for name, sp in [(n, sp) for act in parser._actions
                         if isinstance(act, argparse._SubParsersAction)
@@ -627,7 +746,7 @@ ok(all("--slides" in [a.option_strings[0] for a in sp._actions if a.option_strin
 ok(pn._select_slides([1, 2, 3, 7], "2,7", parser) == [2, 7]
    and pn._select_slides([1, 2, 3], None, parser) == [1, 2, 3],
    "--slides narrows the slides of a workspace")
-expect_error(["synthesize", wse, "--in-lang", "ja", "--slides", "99",
+expect_error(["wse", "synthesize", "--lang", "ja", "--slides", "99",
               "--ref-wav", "a", "--ref-text", "b"], "no slide of this workspace matches")
 
 def run_cli(argv):
@@ -648,12 +767,12 @@ ok(run_cli(["--version"])[0].strip().endswith(pn.__version__)
    and run_cli(["--version"])[1] == 0,
    "--version prints the version instead of the help")
 ok(run_cli([])[1] != 0, "no command at all is still an error")
-ok("COMMAND --help" in top, "the help says how to see the options of a command")
+ok("WS COMMAND --help" in top, "the help says how to see the options of a command")
 
-sub_help = run_cli(["verify", "--help"])[0]
-ok("--in_lang" not in sub_help and "--in-lang" in sub_help,
+sub_help = run_cli(["ws", "verify", "--help"])[0]
+ok("--in_lang" not in sub_help and "--in-lang" in sub_help and "--lang" in sub_help,
    "an option is listed once, under its hyphenated spelling")
-ok(parser.parse_args(["verify", "ws", "--in_lang", "ja"]).in_lang == "ja",
+ok(parser.parse_args(["ws", "verify", "--in_lang", "ja"]).in_lang == "ja",
    "the underscore spelling still works although it is not listed")
 undocumented = []
 for act in parser._actions:
@@ -664,18 +783,18 @@ for act in parser._actions:
                              if a.option_strings and a.help is None]
 ok(undocumented == [], f"every option has help text (missing: {undocumented})")
 
-ok(parser.parse_args(["synthesize", "ws", "--ref-wav", "a.wav", "--ref-text", "a.txt"]).ref_text == "a.txt",
+ok(parser.parse_args(["ws", "synthesize", "--ref-wav", "a.wav", "--ref-text", "a.txt"]).ref_text == "a.txt",
    "the reference transcript option is --ref-text, matching --ref-wav")
 
-ok(parser.parse_args(["synthesize", "ws", "--ref-w", "a.wav", "--ref-t", "a.txt"]).ref_wav == "a.wav"
-   and parser.parse_args(["synthesize", "ws", "--ref-l", "ja"]).ref_lang == "ja"
-   and parser.parse_args(["pack", deck, "--out", "x.pptx", "--work", "ws"]).workspace == "ws",
+ok(parser.parse_args(["ws", "synthesize", "--ref-w", "a.wav", "--ref-t", "a.txt"]).ref_wav == "a.wav"
+   and parser.parse_args(["ws", "synthesize", "--ref-l", "ja"]).ref_lang == "ja"
+   and parser.parse_args(["ws", "pack", deck, "o.pptx", "--data", "text"]).data_type == "text",
    "an option may be abbreviated as far as it stays unambiguous")
-expect_error(["synthesize", "ws", "--ref-", "a"], "ambiguous option")
+expect_error(["ws", "synthesize", "--ref-", "a"], "ambiguous option")
 
-ok(parser.parse_args(["synthesize", "ws", "--dic", "x.csv"]).dict_file == ["x.csv"],
+ok(parser.parse_args(["ws", "synthesize", "--dic", "x.csv"]).dict_file == ["x.csv"],
    "an abbreviation is not ambiguous against the option's own underscore spelling")
-ok(parser.parse_args(["synthesize", "ws", "--dict-file=z.csv"]).dict_file == ["z.csv"],
+ok(parser.parse_args(["ws", "synthesize", "--dict-file=z.csv"]).dict_file == ["z.csv"],
    "--option=value works together with the underscore spelling")
 
 print("ALL TESTS PASSED")

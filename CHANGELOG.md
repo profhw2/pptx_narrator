@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The command line is now `pptx-narrator WS COMMAND [INPUT] [OUTPUT] [OPTIONS]`: the workspace comes first and the command second. `INPUT` and `OUTPUT` are the files outside the workspace that a command reads or writes (`extract DECK`, `scan DICT`, `pack DECK OUT`); the files inside the workspace are chosen with `--lang`, `--slides` and the model options. `--workspace`, `--out` and the positional target of `pack` are removed, as is naming one file of a workspace as `INPUT` (use `--slides`).
+- Nothing is carried over from an earlier run any more: `INPUT` can no longer be left out, and `verify` and `pack` no longer take the engine and language of the last `synthesize`. `.pptx_narrator_state.json`, which served that purpose, is no longer written.
+- `--lang` gives the language of the texts a command works on; it is short for giving `--in-lang` and `--out-lang` the same language.
+- Existing files and notes are not overwritten unless `--update` (write what has changed) or `--overwrite` (write everything selected) is given; generated audio is the exception, since it is made from the text and not edited by hand. This applies to `extract` (texts in the workspace), `scan` (an existing dictionary needs `--append` or `--overwrite`), `translate` (`--retranslate` is replaced by `--overwrite`; `--update` translates again where the source changed, keeping translations edited by hand) and `pack` (`--forceupdate` is replaced by `--overwrite`; an existing `OUT` needs `--update` or `--overwrite`, and `OUT` must differ from `DECK`).
+- `pack --data-type text|audio|all` replaces the positional target. Without `--lang`, `pack` writes the texts of every language of the workspace; a slide plays one audio, so audio of several languages needs `--lang`, and missing audio is reported rather than an error.
+- Notes are written per language: a note with texts of several languages has one heading of the same form per language (`=== pptx-narrator: [en] translated from [ja] <time> #<hash>; edited <time> ===`), no language being treated specially, and a note of one language has none. For each language, the text is compared with that part of the note and with what `extract` read or `pack` wrote; the same text is not written again, so a part that is not rewritten keeps its formatting and struck-through text, and a language the note lacks is added. Notes in the earlier layout (`narration` / `source`) are still read, and `extract` reads each part into the text of its language.
+- `extract` no longer sets aside a translation whose source changed (`*.stale.txt`); `translate --update` handles that case.
+
+### Added
+- `synthesize` records the text and dictionaries each audio was made from (`audio_sources.json`); `pack` and `verify` warn when a text was edited after its audio was made.
+- `translations.json` also records when a translation was made and the translation itself, so that a translation edited by hand is recognized.
+- Every run appends what it logged to `pptx_narrator.log` in the workspace, ends with the commands that can come next and a report of the files it wrote, and records those files in `.pptx_narrator_history.jsonl`; `pptx-narrator WS history [--dates]` lists the runs.
+- Settings that are paths are recorded relative to the workspace when inside it, and absolute otherwise.
+
+### Fixed
+- `pack` rewrote a note even when its text was unchanged, losing its formatting and struck-through text.
+- A single file named as `INPUT` of `scan`, `translate`, `synthesize` or `verify` did not have its results copied back into the workspace (the feature is removed).
+
 ## 1.0.0 – 2026-09-18
 
 First public release. Versions 1.1.0 and 1.2.0 were development numbers used before this release and are not published.
