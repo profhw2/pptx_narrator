@@ -9,7 +9,14 @@ authors:
     affiliation: "Graduate School of Information Science and Technology, Hokkaido University"
     orcid: "https://orcid.org/0000-0002-1892-9067"
 repository-code: "https://github.com/profhw2/pptx_narrator"
-# doi: added with the v1.0.0 Zenodo release
+doi: 10.5281/zenodo.22982221
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22796544
+    description: All versions of PPTX-Narrator (concept DOI); resolves to the latest version.
+  - type: doi
+    value: 10.5281/zenodo.22982221
+    description: Version 1.0.0.
 keywords:
   - text-to-speech
   - voice-cloning

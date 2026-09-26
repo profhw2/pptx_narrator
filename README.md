@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22796544.svg)](https://doi.org/10.5281/zenodo.22796544)
 
 **PPTX-Narrator** turns the presenter notes of a PowerPoint deck into narration spoken in the presenter's own cloned voice, in the language of the notes or translated into another language, and writes the audio back into the deck. The whole deck keeps one consistent voice however often it is revised, even when the presenter cannot speak (e.g. because of a cold).
 

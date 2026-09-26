@@ -2,7 +2,7 @@
 
 ## 1.0.0 – 2026-09-27
 
-First public release. Versions 1.1.0 and 1.2.0 were development numbers used before this release and are not published.
+First public release.
 
 ### Command line
 - An error names the command it concerns and shows that command's usage; a failure during a run says which command failed and why, keeps the details in the log of the workspace, and is recorded in its history. Files named by options (`--ref-wav`, `--ref-text`, `--dict-file`, `--letter-map`) are checked before a run starts.
