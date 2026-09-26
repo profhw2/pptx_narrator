@@ -788,6 +788,11 @@ ok(status == 1 and any("verify failed: RuntimeError: the ASR model could not be 
    and last["status"] == "failed" and "ASR model" in last["error"]
    and "Traceback" in read(os.path.join(wsi, pn.LOG_FILE)),
    "a failure names the command and its cause; the traceback goes to the log, the failure to the history")
+hist = io.StringIO()
+with contextlib.redirect_stdout(hist), contextlib.redirect_stderr(io.StringIO()):
+    pn.main(["wsi", "history"])
+ok("verify  [FAILED: RuntimeError: the ASR model could not be loaded]" in hist.getvalue(),
+   "history shows a failed run as a failure, with its cause")
 pn._CONFIG_PATH = "/somewhere/pptx_narrator.toml"
 logs.clear()
 pn._merge_effective("pack", parser.parse_args(["ws", "pack", deck, "o.pptx"]), {"common": {"workspace": "w"}}, parser)

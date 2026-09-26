@@ -3514,7 +3514,14 @@ def show_history(ws, dates=False):
             files = e.get("written", {})
             n_files = len(files.get("created", [])) + len(files.get("changed", []))
             when = (e.get("generated_at", "")[:16].replace("T", " ") + "  ") if dates else ""
-            print(f"{k:3d}  {when}{' '.join(parts)}" + (f"  ({n_files} file(s) written)" if files else ""))
+            status = e.get("status", "success")
+            if status == "failed":
+                outcome = f"  [FAILED: {e.get('error', 'no reason recorded')}]"
+            elif status != "success":
+                outcome = f"  [{status}]"
+            else:
+                outcome = f"  ({n_files} file(s) written)" if files else ""
+            print(f"{k:3d}  {when}{' '.join(parts)}{outcome}")
 
 
 def _record_run(command, ws, effective, config_path, deck=None, out=None, dict_out=None, written=None):
