@@ -372,12 +372,22 @@ cleared, n_cleared = pn.clear_media_playback_settings(xml_trim, {"rId2"})
 ok(n_cleared == 1 and cleared.startswith('<p14:media r:embed="rId2"/>') and '<p14:trim st="10"/>' in cleared,
    "trim/fade/bookmarks of the replaced audio removed, other media untouched")
 
-# ---------------------------------------------------------------- structured notes round trip
-note = pn.compose_structured_note("en", "Today we talk about DNA.", "ja", "今日はDNAの話です。")
-info = pn.parse_structured_note(note)
-ok(info["narration_lang"] == "en" and info["narration_text"] == "Today we talk about DNA." and info["source_text"] == "今日はDNAの話です。"
-   and not info["spoken"], "compose/parse structured note")
-ok(pn.parse_structured_note("普通のノート") is None, "ordinary notes are not structured")
+# ---------------------------------------------------------------- notes in the layout of earlier versions
+def compose_structured_note(narration_lang, narration_text, source_lang, source_text,
+                            fingerprint=None, spoken=False):
+    """A note as earlier versions wrote it (narration above, source below)."""
+    fingerprint = fingerprint or pn.text_fingerprint(source_text)
+    head = (f"=== pptx-narrator: narration [{narration_lang}] from [{source_lang}] "
+            f"#{fingerprint}{' spoken' if spoken else ''} ===")
+    return (f"{head}\n{narration_text.strip()}\n\n"
+            f"=== pptx-narrator: source [{source_lang}] ===\n{source_text.strip()}")
+
+note = compose_structured_note("en", "Today we talk about DNA.", "ja", "今日はDNAの話です。")
+secs = [s_ for s_ in pn.split_note_sections(note.split("\n")) if s_["lang"]]
+ok([s_["lang"] for s_ in secs] == ["en", "ja"] and pn._section_text(secs[0]["lines"]) == "Today we talk about DNA."
+   and pn._section_text(secs[1]["lines"]) == "今日はDNAの話です。" and secs[0]["info"]["source_lang"] == "ja",
+   "a note in the layout of earlier versions is read into one text per language")
+ok([s_["lang"] for s_ in pn.split_note_sections(["普通のノート"])] == [None], "an ordinary note has no headings")
 ok(pn.text_fingerprint("a\r\nb  \n") == pn.text_fingerprint("a\nb"), "fingerprint ignores line endings and trailing spaces")
 
 # extract the packed deck again: source part is extracted, unchanged translation restored
@@ -414,7 +424,7 @@ ok(read(os.path.join(ws5, "slide_1_de.txt")) == "von Hand",
    "--update of extract keeps a text edited in the workspace")
 
 # spoken-form narration blocks are not restored as translations
-spoken_note = pn.compose_structured_note("de", "Boten-RNA", "ja", "mRNAの話", spoken=True)
+spoken_note = compose_structured_note("de", "Boten-RNA", "ja", "mRNAの話", spoken=True)
 prs_s = Presentation(); s_ = prs_s.slides.add_slide(prs_s.slide_layouts[5]); s_.notes_slide.notes_text_frame.text = spoken_note
 sp = os.path.join(d, "spoken.pptx"); prs_s.save(sp)
 ws6 = os.path.join(d, "ws6"); os.makedirs(ws6)
@@ -593,6 +603,8 @@ cli_cwd = os.path.join(d, "cli"); os.makedirs(cli_cwd); os.chdir(cli_cwd)
 os.makedirs(os.path.join(cli_cwd, "ws"))
 for _lang in ("ja", "de", "nl"):
     write(os.path.join(cli_cwd, "ws", f"slide_1_{_lang}.txt"), "text")
+write(os.path.join(cli_cwd, "ref.wav"), "not really audio")
+write(os.path.join(cli_cwd, "ref.txt"), "transcript")
 parser = pn.build_parser()
 a = parser.parse_args(["ws", "translate", "--in_lang", "JA", "--out-lang", "zh_cn",
                        "--dict-file", "a.csv", "--dict_file", "b.csv"])
@@ -620,9 +632,13 @@ def expect_error(argv, text):
 expect_error(["ws", "extract"], "DECK")
 expect_error(["ws", "pack", deck], "OUT")
 expect_error(["ws", "synthesize", "--lang", "nl", "--engine", "qwen3",
-              "--ref-wav", "a", "--ref-text", "b"], "Qwen3-TTS does not support 'nl'")
+              "--ref-wav", "ref.wav", "--ref-text", "ref.txt"], "Qwen3-TTS does not support 'nl'")
 expect_error(["ws", "synthesize", "--lang", "de", "--engine", "gpt_sovits",
-              "--ref-wav", "a", "--ref-text", "b"], "GPT-SoVITS does not support")
+              "--ref-wav", "ref.wav", "--ref-text", "ref.txt"], "GPT-SoVITS does not support")
+expect_error(["ws", "synthesize", "--lang", "ja", "--ref-wav", "no_such.wav", "--ref-text", "ref.txt"],
+             "--ref-wav: no such file: no_such.wav")
+expect_error(["ws", "scan", "d.csv"], "pptx-narrator WS scan: error:")
+expect_error(["ws", "scan", "d.csv"], "usage: pptx-narrator WS scan")
 expect_error(["ws", "translate", "--in-lang", "de", "--out-lang", "de"], "translate requires different")
 expect_error(["ws", "translate", "--lang", "de"], "translate requires different")
 expect_error(["ws", "translate", "--lang", "de", "--in-lang", "ja", "--out-lang", "en"],
@@ -753,6 +769,38 @@ rec = pn._record_effective({"dict_file": [os.path.join(ws2, "d.csv"), "/abs/x.cs
 ok(rec["dict_file"] == ["d.csv", "/abs/x.csv"] and rec["ref_wav"] == os.path.join("voice", "ref.wav")
    and rec["slides"] == "1-3", "path settings inside the workspace are recorded relative to it")
 
+# a failure during a run names the command and the cause, and is recorded as a failure
+_orig_verify = pn.step_verify_audio
+def _failing_verify(*a, **k):
+    raise RuntimeError("the ASR model could not be loaded")
+pn.step_verify_audio = _failing_verify
+logs.clear()
+try:
+    with contextlib.redirect_stderr(io.StringIO()):
+        pn.main(["wsi", "verify", "--lang", "ja", "--engine", "qwen3"])
+    status = 0
+except SystemExit as e:
+    status = e.code
+pn.step_verify_audio = _orig_verify
+with open(os.path.join(wsi, ".pptx_narrator_history.jsonl"), encoding="utf-8") as f:
+    last = json.loads(f.read().splitlines()[-1])
+ok(status == 1 and any("verify failed: RuntimeError: the ASR model could not be loaded" in m for m in logs)
+   and last["status"] == "failed" and "ASR model" in last["error"]
+   and "Traceback" in read(os.path.join(wsi, pn.LOG_FILE)),
+   "a failure names the command and its cause; the traceback goes to the log, the failure to the history")
+pn._CONFIG_PATH = "/somewhere/pptx_narrator.toml"
+logs.clear()
+pn._merge_effective("pack", parser.parse_args(["ws", "pack", deck, "o.pptx"]), {"common": {"workspace": "w"}}, parser)
+pn._CONFIG_PATH = None
+ok(any("'workspace' in /somewhere/pptx_narrator.toml is no longer used (the workspace is now the first argument"
+       in m and "Remove it from the file" in m for m in logs),
+   "a key of an earlier version is reported with its file and what to do")
+from lxml import etree as _et2
+_p = _et2.fromstring('<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>2026/9/26\u200bに発表</a:t></a:r>'
+                     '<a:fld type="datetime1"><a:t>2026/9/26</a:t></a:fld><a:fld type="slidenum"><a:t>3</a:t></a:fld></a:p>')
+ok(pn._paragraph_text(_p) == "2026/9/26\u200bに発表" and "2026/9/26\u200bに".translate(pn._ZERO_WIDTH) == "2026/9/26に",
+   "date and slide-number fields are left out, a date the author typed is kept; zero-width characters are removed")
+
 ok(not hasattr(parser.parse_args(["ws", "pack", deck, "o.pptx"]), "use_spoken_notes")
    and "--use-spoken-notes" not in open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
                                         encoding="utf-8").read(),
@@ -776,7 +824,7 @@ ok(pn._select_slides([1, 2, 3, 7], "2,7", parser) == [2, 7]
    and pn._select_slides([1, 2, 3], None, parser) == [1, 2, 3],
    "--slides narrows the slides of a workspace")
 expect_error(["wse", "synthesize", "--lang", "ja", "--slides", "99",
-              "--ref-wav", "a", "--ref-text", "b"], "no slide of this workspace matches")
+              "--ref-wav", "ref.wav", "--ref-text", "ref.txt"], "no slide of this workspace matches")
 
 def run_cli(argv):
     """Run the CLI and return (stdout, exit status)."""

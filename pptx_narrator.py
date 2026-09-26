@@ -12,6 +12,7 @@ from collections import Counter
 import difflib
 import hashlib
 import shlex
+import traceback
 import sys
 import time
 import shutil
@@ -46,6 +47,8 @@ def _ensure_nltk_data():
                 )
                 sys.exit(1)
 
+# The weight paths are sent to the GPT-SoVITS API server and resolved there, relative to the
+# server's own directory, not to this script.
 MODELS_CONFIG = {
     "v2ProPlus": {
         "gpt": "./GPT_SoVITS/pretrained_models/s1v3.ckpt",
@@ -65,7 +68,7 @@ MODELS_CONFIG = {
 # Configuration & Constants
 # ==========================================
 # Workspace file names carry the language of the text: slide_N_<lang>.txt, with <lang>
-# the Google Translate code (slide_3_ja.txt, slide_3_en.txt, slide_3_zh-CN.txt). Files
+# a language code (slide_3_ja.txt, slide_3_en.txt, slide_3_zh-CN.txt). Files
 # written by pre-release versions (slide_N.txt for Japanese, slide_N_eng.txt for English)
 # are still recognized when a workspace is read.
 CJK_LANGS = {"ja", "zh", "yue", "ko"}
@@ -81,7 +84,9 @@ _TEXT_FILE_RE = re.compile(r"^slide_(\d+)(?:_([A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})
 
 
 def normalize_lang(code):
-    """Normalize a language code to the Google Translate spelling.
+    """Normalize a language code to the spelling used in file names (lower-case, with the
+    region in capitals; the codes of earlier versions, such as 'iw' for Hebrew, are kept so
+    that their workspaces are still read).
 
     'JA' -> 'ja', 'zh_cn' -> 'zh-CN', 'zh' -> 'zh-CN', 'eng' -> 'en', 'he' -> 'iw'.
     """
@@ -128,7 +133,7 @@ def gpt_sovits_language(lang):
 
 
 # Language identification of the notes (--source-lang auto)
-_LANGID_TO_GOOGLE = {"he": "iw", "jv": "jw", "yue": "zh-TW", "wuu": "zh-CN"}
+_LANGID_TO_FILE_CODE = {"he": "iw", "jv": "jw", "yue": "zh-TW", "wuu": "zh-CN"}
 _language_identifier = None
 
 
@@ -168,7 +173,7 @@ def detect_language(text):
         # Kanji/hanzi only: Chinese or a kanji-only Japanese note
         return _chinese_variant(text), False
     lang, prob = _get_language_identifier().classify(text)
-    lang = _LANGID_TO_GOOGLE.get(lang, lang)
+    lang = _LANGID_TO_FILE_CODE.get(lang, lang)
     if lang == "zh":
         lang = _chinese_variant(text)
     return lang, (len(letters) >= 20 and prob >= 0.9)
@@ -247,31 +252,6 @@ def text_fingerprint(text):
     norm = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n").replace("\v", "\n")
     norm = "\n".join(line.rstrip() for line in norm.strip().split("\n"))
     return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
-
-
-def compose_structured_note(narration_lang, narration_text, source_lang, source_text,
-                            fingerprint=None, spoken=False):
-    fingerprint = fingerprint or text_fingerprint(source_text)
-    head = (f"=== pptx-narrator: narration [{narration_lang}] from [{source_lang}] "
-            f"#{fingerprint}{' spoken' if spoken else ''} ===")
-    return (f"{head}\n{narration_text.strip()}\n\n"
-            f"=== pptx-narrator: source [{source_lang}] ===\n{source_text.strip()}")
-
-
-def parse_structured_note(text):
-    """Split a structured note; returns None for ordinary notes."""
-    text = text.replace("\r\n", "\n").replace("\v", "\n")
-    m_src = _SOURCE_MARK_RE.search(text)
-    if not m_src:
-        return None
-    info = {"source_lang": normalize_lang(m_src.group(1)), "source_text": text[m_src.end():].strip(),
-            "narration_lang": None, "narration_text": "", "fingerprint": None, "spoken": False}
-    m_nar = _NARRATION_MARK_RE.search(text, 0, m_src.start())
-    if m_nar:
-        info.update(narration_lang=normalize_lang(m_nar.group(1)),
-                    narration_text=text[m_nar.end():m_src.start()].strip(),
-                    fingerprint=m_nar.group(3).lower(), spoken=bool(m_nar.group(4)))
-    return info
 
 
 # ------------------------------------------
@@ -370,6 +350,8 @@ def _paragraph_text(p):
             t = child.find(_A_NS + "t")
             parts.append((t.text or "") if t is not None else "")
         elif child.tag == _A_NS + "fld":
+            if _is_page_field(child):
+                continue
             t = child.find(_A_NS + "t")
             parts.append((t.text or "") if t is not None else "")
         elif child.tag == _A_NS + "br":
@@ -460,6 +442,29 @@ def _is_struck(run):
     return rpr is not None and rpr.get("strike") in ("sngStrike", "dblStrike")
 
 
+# Invisible characters left out of a note: zero-width space, non-joiner and joiner, word
+# joiner, and the byte-order mark / zero-width no-break space.
+_ZERO_WIDTH = {ord(c): None for c in "\u200b\u200c\u200d\u2060\ufeff"}
+
+
+def _is_page_field(fld):
+    """A date or slide-number field that PowerPoint fills in, not text of the note."""
+    kind = (fld.get("type") or "").lower()
+    return kind.startswith("datetime") or kind == "slidenum"
+
+
+# Placeholders of the notes page that PowerPoint fills in: not part of the note.
+_PAGE_PLACEHOLDERS = {"DATE", "SLIDE_NUMBER", "HEADER", "FOOTER"}
+
+
+def _is_page_placeholder(shape):
+    try:
+        return shape.is_placeholder and shape.placeholder_format.type is not None \
+            and shape.placeholder_format.type.name in _PAGE_PLACEHOLDERS
+    except (AttributeError, ValueError):
+        return False
+
+
 def _text_frame_text(text_frame, struck=None):
     """The text of a text frame as python-pptx gives it (paragraphs joined by \\n,
     line breaks as \\v), leaving out runs with a single or double strikethrough:
@@ -479,6 +484,8 @@ def _text_frame_text(text_frame, struck=None):
                     continue
                 parts.append(text)
             elif tag == _A_NS + "fld":
+                if _is_page_field(child):
+                    continue
                 t = child.find(_A_NS + "t")
                 parts.append((t.text or "") if t is not None else "")
             elif tag == _A_NS + "br":
@@ -489,12 +496,13 @@ def _text_frame_text(text_frame, struck=None):
 
 def _slide_note_raw(slide, struck=None):
     """The note of a slide as extract reads it: the text of every text shape in the
-    notes page, excluding slide-number placeholders and struck-through text."""
+    notes page, excluding the date, slide-number, header and footer placeholders and
+    fields, and struck-through text."""
     if not slide.has_notes_slide:
         return ""
     text_list = []
     for shape in slide.notes_slide.shapes:
-        if shape.has_text_frame:
+        if shape.has_text_frame and not _is_page_placeholder(shape):
             found = []
             text = _text_frame_text(shape.text_frame, found).strip()
             if text and not text.isdigit():
@@ -562,6 +570,9 @@ def _is_single_letter(term):
 _KANJI_RE = re.compile(r'[一-鿿々]')
 
 
+_COMPOUNDS_WARNED = False
+
+
 def japanese_compounds(text):
     """Compounds of several words, with the reading a Japanese front end assembles for them.
 
@@ -572,6 +583,11 @@ def japanese_compounds(text):
     try:
         import pyopenjtalk
     except ImportError:
+        global _COMPOUNDS_WARNED
+        if not _COMPOUNDS_WARNED:
+            logger.warning("--scan-compounds needs pyopenjtalk, which is not installed "
+                           "(pip install 'pptx-narrator[verify]'); no compounds are proposed.")
+            _COMPOUNDS_WARNED = True
         return {}
     try:
         tokens = pyopenjtalk.run_frontend(text)
@@ -819,9 +835,9 @@ def _strip_dictionary_comment(line):
 def read_dictionary_file(path, lang=None):
     """Return [(string, replacement, type)] from one dictionary CSV."""
     with open(path, 'r', encoding='utf-8', newline='') as f:
-        # Everything from a '#' to the end of the line is a comment, so a line can explain or
-        # switch off an entry; a line with nothing left in front of the '#' is skipped. A '#'
-        # inside double quotes is part of the term (e.g. "#1").
+        # A ';' at the start of a line or after a space begins a comment (see
+        # _strip_dictionary_comment), so a line can explain or switch off an entry; a line
+        # with nothing left in front of the comment is skipped.
         lines = [_strip_dictionary_comment(line) for line in f]
         rows = [r for r in csv.reader([ln for ln in lines if ln]) if any(c.strip() for c in r)]
     if not rows:
@@ -984,8 +1000,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                         + ", ".join(repr(t) for t in struck[:5]) + (" ..." if len(struck) > 5 else ""))
         raw_fingerprints[slide_num] = text_fingerprint(raw_text)
 
-        clean_text = raw_text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
-        txt = re.sub(r'\d{4}/\d+/\d+', '', clean_text).strip()
+        txt = raw_text.translate(_ZERO_WIDTH).strip()
         if not txt:
             logger.info(f"Slide #{slide_num} has no notes (skipped)")
             continue
@@ -1282,25 +1297,30 @@ def step_generate_audio(
         }
 
         started = time.time()
+        wav_p = os.path.join(workspace_dir, "temp.wav")
         try:
             res = requests.post(tts_url, json=payload, timeout=600)
-            if res.status_code == 200:
-                wav_p = os.path.join(workspace_dir, "temp.wav")
-                with open(wav_p, "wb") as f:
-                    f.write(res.content)
-
-                audio = AudioSegment.from_file(wav_p)
-                if enable_drc:
-                    audio = compress_dynamic_range(audio, threshold=drc_threshold, ratio=drc_ratio)
-                    audio = normalize(audio)
-                audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
-                             format="ipod")
-                os.remove(wav_p)
-                stats.add(slide_num, time.time() - started, len(audio))
-            else:
-                logger.error(f"Slide {slide_num} TTS failed! Server returned [{res.status_code}]: {res.text}")
+        except requests.RequestException as e:
+            logger.error(f"Slide #{slide_num}: could not reach the GPT-SoVITS server at {api_url}: {e}")
+            continue
+        if res.status_code != 200:
+            logger.error(f"Slide #{slide_num}: the GPT-SoVITS server returned [{res.status_code}]: {res.text}")
+            continue
+        try:
+            with open(wav_p, "wb") as f:
+                f.write(res.content)
+            audio = AudioSegment.from_file(wav_p)
+            if enable_drc:
+                audio = compress_dynamic_range(audio, threshold=drc_threshold, ratio=drc_ratio)
+                audio = normalize(audio)
+            audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
+                         format="ipod")
+            stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
-            logger.error(f"Slide {slide_num} TTS connection error: {e}")
+            logger.error(f"Slide #{slide_num}: the audio from GPT-SoVITS could not be converted to m4a: {e}")
+        finally:
+            if os.path.exists(wav_p):
+                os.remove(wav_p)
     stats.report()
 
 class SynthesisStats:
@@ -1424,8 +1444,8 @@ def step_generate_audio_qwen3(
         import numpy as np
         import soundfile as sf
     except ImportError as e:
-        logger.error(f"Missing required libraries: {e} (pip install 'pptx-narrator[qwen3]')")
-        return
+        raise RuntimeError(f"Qwen3-TTS needs a library that is not installed ({e}); "
+                           "pip install 'pptx-narrator[qwen3]'") from e
 
     with open(ref_text_f, "r", encoding="utf-8") as f:
         ref_txt = f.read().strip()
@@ -1509,11 +1529,13 @@ def step_generate_audio_qwen3(
                 audio = normalize(audio)
             audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
                          format="ipod")
-
-            os.remove(wav_p)
             stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
-            logger.error(f"Slide {slide_num} Qwen3-TTS generation error: {e}")
+            logger.error(f"Slide #{slide_num}: Qwen3-TTS could not generate the audio: {e}")
+        finally:
+            tmp_wav = os.path.join(workspace_dir, "temp_qwen3.wav")
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
     stats.report()
 
 _KANA_PUNCT_RE = re.compile(r"[\s、。，．,.!?！？「」『』（）()・…]")
@@ -1600,8 +1622,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         if is_ja:
             import pyopenjtalk  # noqa: F401
     except ImportError as e:
-        logger.error(f"Missing dependency: {e} (pip install 'pptx-narrator[verify]')")
-        return
+        raise RuntimeError(f"verify needs a library that is not installed ({e}); "
+                           "pip install 'pptx-narrator[verify]'") from e
 
     logger.info(f"Loading Whisper model ({asr_model_size}, device={asr_device})...")
     asr_model = WhisperModel(asr_model_size, device=asr_device, compute_type="int8")
@@ -1996,6 +2018,20 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)
     embedded, audio_same = 0, 0
+    try:
+        embedded, audio_same = _pack_audio(tmp_pptx, output_pptx, workspace_dir, requested_slides, targets,
+                                           audio_lang, model_label, update, remove_recorded, icon_outside,
+                                           pause_ms)
+    finally:
+        if os.path.exists(tmp_pptx):
+            os.remove(tmp_pptx)
+    _pack_summary(embedded, audio_same, notes_written, protected, mismatched, output_pptx)
+    return embedded, notes_written, mismatched
+
+
+def _pack_audio(tmp_pptx, output_pptx, workspace_dir, requested_slides, targets, audio_lang, model_label,
+                update, remove_recorded, icon_outside, pause_ms):
+    embedded, audio_same = 0, 0
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(tmp_pptx, 'r') as z:
             z.extractall(tmpdir)
@@ -2030,8 +2066,10 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
         _remove_unreferenced_media(tmpdir)
         archive_path = _zip_package(tmpdir, os.path.splitext(output_pptx)[0] + ".packing.zip")
         os.replace(archive_path, output_pptx)
-    os.remove(tmp_pptx)
+    return embedded, audio_same
 
+
+def _pack_summary(embedded, audio_same, notes_written, protected, mismatched, output_pptx):
     summary = f"Packed audio on {embedded} slide(s); wrote notes on {len(notes_written)} slide(s)."
     if audio_same:
         summary += f" {audio_same} slide(s) already had the same audio."
@@ -2043,7 +2081,6 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
         logger.warning("Slides whose note does not match the texts of the workspace: "
                        + ", ".join(map(str, mismatched)) + ".")
     logger.info(f"Final output saved to: {output_pptx}")
-    return embedded, notes_written, mismatched
 
 
 # ------------------------------------------
@@ -2939,6 +2976,11 @@ _POSITIONAL_KEYS = {"command", "workspace", "deck", "out_deck", "dictionary", "c
 # Configuration keys of earlier versions that no longer mean anything.
 _RETIRED_CONFIG_KEYS = {"workspace": None, "out": None, "target": "data_type", "input": None,
                         "retranslate": "overwrite", "forceupdate": "overwrite"}
+_RETIRED_CONFIG_WHY = {
+    "workspace": " (the workspace is now the first argument: pptx-narrator WS COMMAND ...)",
+    "out": " (the deck pack writes is now its second argument: pack DECK OUT)",
+    "input": " (the files a command reads are given on its command line)",
+}
 # Settings that are paths, recorded relative to the workspace when inside it.
 _PATH_SETTINGS = ("dict_file", "letter_map", "ref_wav", "ref_text")
 
@@ -2949,8 +2991,11 @@ def _merge_effective(command, args, config, parser):
     for key, replacement in _RETIRED_CONFIG_KEYS.items():
         if key in cfg:
             cfg.pop(key)
-            logger.warning(f"The configuration key '{key}' is no longer used"
-                           + (f"; use '{replacement}'." if replacement else "."))
+            where = f" in {_CONFIG_PATH}" if _CONFIG_PATH else ""
+            why = _RETIRED_CONFIG_WHY.get(key, "")
+            logger.warning(f"The configuration key '{key}'{where} is no longer used{why}. "
+                           + (f"Use '{replacement}' instead. " if replacement else "")
+                           + "Remove it from the file to stop this message.")
     _deep_update(values, cfg)
     for key, value in vars(args).items():
         if key.startswith("_") or key in _POSITIONAL_KEYS:
@@ -3050,6 +3095,14 @@ def _validate_and_normalize(command, v, parser):
         parser.error("--update and --overwrite cannot be combined")
     if command == "scan" and v.get("append") and v.get("overwrite"):
         parser.error("--append and --overwrite cannot be combined")
+    for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text", "ref_text"), ("--letter-map", "letter_map"),
+                      ("--dict-file", "dict_file")):
+        if command not in {"scan", "translate", "synthesize"}:
+            break
+        values = v.get(key) if isinstance(v.get(key), list) else [v.get(key)]
+        for path in values or []:
+            if path and not os.path.isfile(path):
+                parser.error(f"{flag}: no such file: {path}")
     if command == "synthesize":
         missing = [flag for flag, key in (("--ref-wav", "ref_wav"), ("--ref-text", "ref_text")) if not v.get(key)]
         if missing:
@@ -3065,6 +3118,17 @@ def _validate_and_normalize(command, v, parser):
     if command in {"verify", "pack"} and v["engine"] == "qwen3":
         v["model"] = f"qwen3-{v['qwen3_model_size']}"
     return v
+
+
+_CONFIG_PATH = None
+
+
+def _command_parser(parser, command):
+    """The parser of one command, whose errors show that command's usage and name."""
+    for act in parser._actions:
+        if isinstance(act, argparse._SubParsersAction):
+            return act.choices.get(command, parser)
+    return parser
 
 
 def _check_command_line(boot, parser):
@@ -3103,6 +3167,10 @@ def main(argv=None):
     _check_command_line(boot, parser)
     args = parser.parse_args(argv)
     command = args.command
+    global _CONFIG_PATH
+    _CONFIG_PATH = config_path
+    # From here on, an error is reported with the usage of the command it concerns.
+    top_parser, parser = parser, _command_parser(parser, command)
     ws = os.path.abspath(args.workspace)
     effective = _merge_effective(command, args, config, parser)
     effective = _resolve_lang(command, effective, args, parser)
@@ -3124,13 +3192,41 @@ def main(argv=None):
         show_history(ws, dates=effective.get("dates"))
         return
     log_handler = _open_workspace_log(ws, argv)
-    before = _workspace_files(ws)
     logger.info(f"Workspace: {ws}")
     try:
         _run_command(command, args, effective, config, config_path, parser, ws)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        logger.error(f"{command} was interrupted.")
+        _record_failure(ws, command, "interrupted")
+        raise SystemExit(130)
+    except Exception as e:
+        logger.error(f"{command} failed: {_describe_error(e)}")
+        log_handler.stream.write(traceback.format_exc())
+        log_handler.flush()
+        _record_failure(ws, command, f"{type(e).__name__}: {e}")
+        print(f"pptx-narrator {command}: the details are in {os.path.join(ws, LOG_FILE)}", file=sys.stderr)
+        raise SystemExit(1)
     finally:
         logger.removeHandler(log_handler)
         log_handler.close()
+
+
+def _describe_error(e):
+    """One line saying what went wrong, in terms of the files and tools involved."""
+    if isinstance(e, FileNotFoundError):
+        return f"file not found: {e.filename or e}"
+    if isinstance(e, PermissionError):
+        return f"permission denied: {e.filename or e}"
+    if isinstance(e, zipfile.BadZipFile):
+        return f"not a valid PPTX (zip) file: {e}"
+    return f"{type(e).__name__}: {e}"
+
+
+def _record_failure(ws, command, reason):
+    _append_history(ws, {"command": command, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                         "workspace_at_run": ws, "status": "failed", "error": reason})
 
 
 def _run_command(command, args, effective, config, config_path, parser, ws):
@@ -3439,13 +3535,7 @@ def _record_run(command, ws, effective, config_path, deck=None, out=None, dict_o
     recorded = _record_effective(effective, ws)
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
-    # The state file (.pptx_narrator_state.json) let the next command leave out its
-    # arguments; nothing is carried over between runs any more, so it is no longer
-    # written. The history and the log of the workspace record what was run.
-    # state = _load_state(_workspace_path(ws, STATE_FILE))
-    # _record_input(state, command, rel_snapshot, {"workspace": ".", "paths": paths})
-    # ... resolved_config, software_version, generated_at, audio_files ...
-    # _save_state(state, _workspace_path(ws, STATE_FILE))
+    # (No state file is written: nothing is carried over from one run to the next.)
 
     metadata = {
         "software_version": __version__,
@@ -3472,7 +3562,7 @@ def _record_run(command, ws, effective, config_path, deck=None, out=None, dict_o
         "input": rel_snapshot,
         "effective": recorded,
         "written": written or {},
-        "status": "success",
+        "status": "success" if (out or dict_out or any((written or {}).values())) else "nothing written",
     })
 
 

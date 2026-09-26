@@ -5,6 +5,7 @@
 First public release. Versions 1.1.0 and 1.2.0 were development numbers used before this release and are not published.
 
 ### Command line
+- An error names the command it concerns and shows that command's usage; a failure during a run says which command failed and why, keeps the details in the log of the workspace, and is recorded in its history. Files named by options (`--ref-wav`, `--ref-text`, `--dict-file`, `--letter-map`) are checked before a run starts.
 - The command line is `pptx-narrator WS COMMAND [INPUT] [OUTPUT] [OPTIONS]`: the workspace of one deck comes first, then one of the commands `extract`, `scan`, `translate`, `synthesize`, `verify`, `pack` and `history`. `INPUT` and `OUTPUT` are the files outside the workspace that a command reads or writes (`extract DECK`, `scan DICT`, `pack DECK OUT`); the files inside the workspace are chosen with `--lang`, `--slides` and the model options, not by path.
 - Nothing runs implicitly and nothing is carried over from an earlier run: what a command needs is given on its command line or in the configuration file.
 - Nothing that exists is overwritten unless `--update` (write what has changed) or `--overwrite` (write everything selected) is given; generated audio is the exception, since it is made from the text and not edited by hand. `scan` adds to an existing dictionary only with `--append`, and `pack` never changes `DECK` and replaces an existing `OUT` only on request.
@@ -20,7 +21,7 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - Paths inside the workspace are recorded relative to it, so a workspace can be moved or copied as a whole; paths outside it are absolute.
 
 ### Notes and texts
-- Presenter notes are extracted per slide as editable text files named after the slide and the language (`slide_3_ja.txt`, `slide_3_en.txt`); the language is identified automatically (kana/Hangul rules plus py3langid). Hidden slides, slide-number and date placeholders and zero-width characters are left out, and so is struck-through text, which the author has deleted.
+- Presenter notes are extracted per slide as editable text files named after the slide and the language (`slide_3_ja.txt`, `slide_3_en.txt`); the language is identified automatically (kana/Hangul rules plus py3langid). Hidden slides, the date, slide-number, header and footer placeholders and fields that PowerPoint fills in, and zero-width characters are left out, and so is struck-through text, which the author has deleted; a date the author typed is kept.
 - Texts are treated alike whether they were extracted, translated or written by hand.
 - `extract` replaces a text already in the workspace only with `--update` (when the note in the deck changed and the text was not edited in the workspace) or `--overwrite`.
 - Typographic apostrophes, primes, quotation marks and dashes in the notes match a dictionary entry written with the plain ASCII character.
@@ -30,7 +31,7 @@ First public release. Versions 1.1.0 and 1.2.0 were development numbers used bef
 - An existing translation is kept; `--update` translates again where the source changed (keeping a translation edited by hand), `--overwrite` translates again. `translations.json` records which version of the source each translation was made from, when, and the translation as made.
 
 ### Dictionaries and readings
-- Dictionaries are plain string-replacement lists (`string,replacement,type`) applied to the notes before translation and to the text before synthesis; `--dict-file` is repeatable, later files taking precedence. Longer strings are replaced first, alphanumeric strings only on word boundaries, and entries with an empty replacement do nothing.
+- Dictionaries are plain string-replacement lists (`string,replacement,type`) given to the translation model as instructions for the terms that occur in a note (the note itself is not changed) and applied to the text before synthesis; `--dict-file` is repeatable, later files taking precedence. Longer strings are replaced first, alphanumeric strings only on word boundaries, and entries with an empty replacement do nothing.
 - A `;` at the start of a line or after a space starts a comment; entries containing a backslash are reported.
 - `scan` proposes candidate terms (acronyms, Latin and katakana words, number–unit expressions, Roman numerals), never single letters or digits; `--scan-compounds` writes the compounds of Japanese notes, with the reading a Japanese front end assembles, as comment lines.
 - Built-in SI-unit readings for Japanese narration, with an optional letter map for spelling out symbols.
