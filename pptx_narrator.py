@@ -1773,7 +1773,8 @@ def _note_sections_xml(body):
     return sections
 
 
-def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, overwrite, audio_lang):
+def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, overwrite, audio_lang,
+                model_label=None):
     """Write the texts of the workspace into the notes, one section per language.
 
     For each language, the text of the workspace (Y) is compared with that part of the note
@@ -1861,9 +1862,32 @@ def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, ove
             s["written"] = True
             written.append((l, y))
             logger.info(f"Slide #{n}: the {l} part of the note replaced with {name}.")
-        if not written:
+        # The text of the audio the slide plays goes on top, where the presenter reads.
+        audio_first = None
+        if audio_lang and "audio" in targets and os.path.exists(
+                os.path.join(workspace_dir, audio_filename(n, audio_lang, model_label))):
+            audio_first = lang_suffix(audio_lang)
+        present = [s for s in sections + added if s["lang"]]
+        misplaced = bool(audio_first and present and lang_suffix(present[0]["lang"]) != audio_first
+                         and any(lang_suffix(s["lang"]) == audio_first for s in present)
+                         and not any(s.get("written") for s in sections + added))
+        if not written and not misplaced:
             continue
-        final = sections + sorted(added, key=lambda s: lang_suffix(s["lang"]))
+        # Newer parts above older ones: what this run wrote goes on top (the text changed
+        # most recently first), and what it left keeps its place below, in the order the
+        # note had -- which earlier runs laid out the same way. The text a presenter reads
+        # first is therefore the one just written, typically the language of the narration.
+        def _mtime(sec):
+            p = os.path.join(workspace_dir, text_filename(n, sec["lang"]))
+            return os.path.getmtime(p) if os.path.exists(p) else 0
+        fresh = sorted([s for s in sections if s.get("written")] + added, key=_mtime, reverse=True)
+        final = fresh + [s for s in sections if not s.get("written")]
+        if audio_first:
+            top = [s for s in final if s["lang"] and lang_suffix(s["lang"]) == audio_first]
+            final = top + [s for s in final if s not in top]
+        if misplaced:
+            logger.info(f"Slide #{n}: the {audio_lang} part of the note moved to the top, above the other "
+                        "languages, to go with the audio (its text is unchanged).")
         multi = sum(1 for s in final if s["lang"]) > 1
         for p in body.findall(_A_NS + "p"):
             body.remove(p)
@@ -1967,7 +1991,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
         audio_lang = lang
     prs = Presentation(original_pptx)
     notes_written, protected, mismatched = _pack_notes(prs, workspace_dir, requested_slides, lang, targets,
-                                                       update, overwrite, audio_lang)
+                                                       update, overwrite, audio_lang, model_label)
 
     tmp_pptx = os.path.join(workspace_dir, "tmp.pptx")
     prs.save(tmp_pptx)

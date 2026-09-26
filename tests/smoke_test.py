@@ -313,12 +313,12 @@ orig_note1 = pn._slide_note_raw(Presentation(packed).slides[0])
 pn.step_pack_pptx(packed, out_deck, ws, [1, 2, 3], "de", "v4")
 notes = Presentation(out_deck).slides[0].notes_slide.notes_text_frame.text
 secs = [s_ for s_ in pn.split_note_sections(notes.split("\n")) if s_["lang"]]
-ok([s_["lang"] for s_ in secs] == ["ja", "de"] and notes.startswith("=== pptx-narrator: [ja] ===\n")
-   and pn._section_text(secs[0]["lines"]) == orig_note1
-   and pn._section_text(secs[1]["lines"]).startswith("[ja->de]")
-   and secs[1]["info"]["source_lang"] == "ja"
-   and secs[1]["info"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"),
-   "write-back: the note keeps its text under its own heading, and the new language is added under another")
+ok([s_["lang"] for s_ in secs] == ["de", "ja"] and notes.startswith("=== pptx-narrator: [de] translated from [ja]")
+   and pn._section_text(secs[1]["lines"]) == orig_note1
+   and pn._section_text(secs[0]["lines"]).startswith("[ja->de]")
+   and secs[0]["info"]["source_lang"] == "ja"
+   and secs[0]["info"]["source_fingerprint"] == pn.text_fingerprint("塩基対の話です。"),
+   "write-back: the language just written is on top, where the presenter reads; the note keeps its text below")
 notes2 = Presentation(out_deck).slides[1].notes_slide.notes_text_frame.text
 ok("=== pptx-narrator: [en] ===" in notes2 and "=== pptx-narrator: [de] translated from [en]" in notes2,
    "write-back for an English-note slide: no language is treated specially")
@@ -458,7 +458,7 @@ _, written12, _ = pn.step_pack_pptx(deck12, os.path.join(d, "out12b.pptx"), ws12
 body12 = Presentation(os.path.join(d, "out12b.pptx")).slides[0].notes_slide.notes_text_frame._txBody
 from lxml import etree as _et; xml12 = _et.tostring(body12, encoding="unicode")
 secs12 = [s_ for s_ in pn.split_note_sections(Presentation(os.path.join(d, "out12b.pptx")).slides[0].notes_slide.notes_text_frame.text.split("\n")) if s_["lang"]]
-ok(written12 == [1] and [s_["lang"] for s_ in secs12] == ["ja", "en"]
+ok(written12 == [1] and [s_["lang"] for s_ in secs12] == ["en", "ja"]
    and 'strike="sngStrike"' in xml12 and 'strike="dblStrike"' in xml12,
    "adding a language keeps the other part of the note as it was, formatting and struck-through text included")
 ws12b = os.path.join(d, "ws12b"); os.makedirs(ws12b)
@@ -466,6 +466,35 @@ pn.step_extract_notes(os.path.join(d, "out12b.pptx"), ws12b, [1], "auto")
 ok(read(os.path.join(ws12b, "slide_1_ja.txt")) == read(os.path.join(ws12, "slide_1_ja.txt"))
    and read(os.path.join(ws12b, "slide_1_en.txt")) == "This is the textbook's DNA primase.",
    "such a note is extracted again into the same texts")
+import time as _time
+_time.sleep(1.1)
+write(os.path.join(ws12, "slide_1_ja.txt"), read(os.path.join(ws12, "slide_1_ja.txt")) + "直しました。")
+_, written12, _ = pn.step_pack_pptx(os.path.join(d, "out12b.pptx"), os.path.join(d, "out12d.pptx"), ws12, [1], "ja",
+                                    "qwen3-1.7B", targets={"text"}, update=True)
+secs12 = [s_ for s_ in pn.split_note_sections(Presentation(os.path.join(d, "out12d.pptx")).slides[0].notes_slide.notes_text_frame.text.split("\n")) if s_["lang"]]
+ok(written12 == [1] and [s_["lang"] for s_ in secs12] == ["ja", "en"],
+   "the part written last goes on top; older parts move down")
+_, written12, _ = pn.step_pack_pptx(os.path.join(d, "out12d.pptx"), os.path.join(d, "out12e.pptx"), ws12, [1], None,
+                                    "qwen3-1.7B", targets={"text"})
+ok(written12 == [] and pn._slide_note_raw(Presentation(os.path.join(d, "out12e.pptx")).slides[0])
+   == pn._slide_note_raw(Presentation(os.path.join(d, "out12d.pptx")).slides[0]),
+   "a pack that writes nothing leaves the order of the note as it is")
+AudioSegment.silent(duration=300).export(os.path.join(ws12, "slide_1_en.qwen3-1.7B.m4a"), format="ipod")
+logs.clear()
+_, written12, _ = pn.step_pack_pptx(os.path.join(d, "out12d.pptx"), os.path.join(d, "out12f.pptx"), ws12, [1], None,
+                                    "qwen3-1.7B", audio_lang="en")
+note12f = Presentation(os.path.join(d, "out12f.pptx")).slides[0].notes_slide.notes_text_frame
+secs12 = [s_ for s_ in pn.split_note_sections(note12f.text.split("\n")) if s_["lang"]]
+xml12f = _et.tostring(note12f._txBody, encoding="unicode")
+ok([s_["lang"] for s_ in secs12] == ["en", "ja"] and any("moved to the top" in m for m in logs)
+   and written12 == [1],
+   "the text of the language whose audio the slide plays is always on top (moved there unchanged)")
+write(os.path.join(ws12, "slide_1_ja.txt"), read(os.path.join(ws12, "slide_1_ja.txt")) + "もう一度直しました。")
+_, written12, _ = pn.step_pack_pptx(os.path.join(d, "out12f.pptx"), os.path.join(d, "out12g.pptx"), ws12, [1], None,
+                                    "qwen3-1.7B", audio_lang="en", update=True)
+secs12 = [s_ for s_ in pn.split_note_sections(Presentation(os.path.join(d, "out12g.pptx")).slides[0].notes_slide.notes_text_frame.text.split("\n")) if s_["lang"]]
+ok(written12 == [1] and [s_["lang"] for s_ in secs12] == ["en", "ja"],
+   "a text written for another language goes below the text of the audio")
 ok(pn.record_audio_sources(ws12, [1], "ja", "qwen3-1.7B", None, 0) == [1]
    and pn.audio_is_older_than_text(ws12, 1, "ja", "qwen3-1.7B") is False
    and pn.audio_is_older_than_text(ws12, 1, "en", "qwen3-1.7B") is None,

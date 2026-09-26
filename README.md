@@ -13,7 +13,7 @@
 - **Reading normalization** – a dictionary of string replacements applied to the narration text, plus built-in reading of SI-prefixed units for Japanese (e.g. `5 mg` → 5ミリグラム).
 - **Voice cloning** – [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (in-process) or [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (via its API server). Which one sounds closer to the speaker is a matter of judgement and changes with engine versions; in the author's use Qwen3-TTS reproduces Japanese and English closely from a single Japanese reference recording, which is why it is the default; any default can be set in the configuration file.
 - **ASR screening (auxiliary)** – audio can be transcribed with `faster-whisper` and compared with the intended text (kana level via `pyopenjtalk` for Japanese, normalized characters otherwise); per-slide similarity, the longest single stretch of disagreement and the character error rate (CER) flag the slides most likely to be misread.
-- **PPTX repackaging** – the narration audio is embedded in each slide (replacing earlier audio or inserted as a new narration object) and the automatic slide advance time (`advTm`) is set to the audio duration plus a short pause, so the deck plays as a self-running show and can be exported as a video. The texts are written back into the notes, all languages of a slide under headings of one form when there are several; a part that is not rewritten keeps its formatting, and later extractions read each part back.
+- **PPTX repackaging** – the narration audio is embedded in each slide (replacing earlier audio or inserted as a new narration object) and the automatic slide advance time (`advTm`) is set to the audio duration plus a short pause, so the deck plays as a self-running show and can be exported as a video. The texts are written back into the notes, all languages of a slide under headings of one form when there are several, the text of the audio on top; a part that is not rewritten keeps its formatting, and later extractions read each part back.
 
 ## Supported languages
 
@@ -173,14 +173,16 @@ The texts of the workspace are written into the notes. Without `--lang`, every l
 - a note edited in the deck since (or one `extract` never read) is written over only with `--overwrite`;
 - a language the note does not have yet is added.
 
+The text of the language whose audio the slide plays is always on top, since it is what the presenter reads; `pack` moves it there, unchanged, if needed. Below it, newer parts are above older ones: what a run writes goes above what it leaves.
+
 Without the option a text needs, `pack` leaves that part of the note and says why. When a note holds texts of several languages, each is preceded by a heading of the same form; a note of one language has none:
 
 ```
-=== pptx-narrator: [ja] ===
-今日はゲノム編集について話します。
-
 === pptx-narrator: [en] translated from [ja] 2026-09-25T14:02 #ae82d4f1fc ===
 Today we talk about genome editing.
+
+=== pptx-narrator: [ja] ===
+今日はゲノム編集について話します。
 ```
 
 The heading says how a text was made: `translated from` the source language, when, and the fingerprint of the source version; `edited` and the time, when the text was changed after it was made. A part that is not rewritten keeps its formatting. Keep the heading lines when editing such notes in PowerPoint: `extract` reads each part into the text of its language. Notes written by earlier versions (`narration [..] from [..]` / `source [..]`) are still read.
