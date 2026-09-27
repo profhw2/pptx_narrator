@@ -264,6 +264,12 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 - Voice cloning should only be used with the consent of the speaker whose voice is cloned.
 - The tool is designed not to overwrite or delete anything the user has made unless asked, and it never changes the input deck; still, as with any software that edits files, keep a copy of the decks and workspaces you cannot afford to lose.
 
+## Planned work
+
+- Narration of slides that have animations but no audio object (the audio has to be placed in the slide's animation timeline).
+- Translation with the whole deck as context, which favours a free translation that keeps the meaning; the translation dictionary would then serve mainly to keep terminology consistent.
+- Comparison on the reading for Chinese (e.g. pinyin), as is done with katakana for Japanese, so that simplified or traditional characters and homophones written by the ASR are not counted as differences.
+
 ## Checking the ASR screening
 
 `examples/screening_check.py` measures which narration errors the check actually notices. The transcript of a slide depends only on its audio, so it is produced once (or read from an existing report) and any number of hypothetical errors can then be scored against it. The script injects one error of a known size into the sequence the check compares (katakana for Japanese, normalized text otherwise) -- a run of characters deleted, as when a phrase is skipped, or replaced by other characters, as when a term is misread -- and reports how often the check notices, by the size of the error and the length of the note. Sizes are in characters of that sequence, so 3 characters is about one short term and 50 is about one sentence:
