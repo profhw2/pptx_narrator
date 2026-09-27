@@ -8,6 +8,7 @@
 - `examples/terms_ja_en.csv`: a translation dictionary for Japanese notes narrated in English.
 - `examples/screening_check.py` takes the workspace first and `--lang`, like the commands (`screening_check.py WS --lang ja`); `--verify-threshold` names its threshold as in `verify`. The old option names still work.
 - README: how to tune the ASR check on one's own decks, option by option.
+- The source is in `src/` (`src/pptx_narrator.py`) and the license in `LICENSE.txt`, as SoftwareX asks of the repositories of its articles; the installed command is unchanged.
 
 ## 1.0.0 – 2026-09-27
 

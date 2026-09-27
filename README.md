@@ -1,6 +1,6 @@
 # PPTX-Narrator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22796544.svg)](https://doi.org/10.5281/zenodo.22796544)
 
@@ -49,7 +49,7 @@ pip install -e ".[verify]"  # + ASR verification
 pip install -e ".[all]"     # everything
 ```
 
-This installs the `pptx-narrator` command. Running `python pptx_narrator.py ...` without installing also works (`pip install -r requirements.txt`).
+This installs the `pptx-narrator` command. Running `python src/pptx_narrator.py ...` without installing also works (`pip install -r requirements.txt`).
 The `scan` command downloads the NLTK `stopwords` and `words` corpora on first use; if that fails behind a proxy, run `python -m nltk.downloader stopwords words`.
 
 ## Quick start
@@ -306,4 +306,4 @@ If you use PPTX-Narrator, please cite the archived release on Zenodo; its DOI is
 
 ## License
 
-[MIT](LICENSE) © 2026 Hidemi Watanabe
+[MIT](LICENSE.txt) © 2026 Hidemi Watanabe

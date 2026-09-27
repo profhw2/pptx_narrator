@@ -9,7 +9,7 @@ description = "Automated voice-cloned narration of PowerPoint presenter notes wi
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE.txt"]
 authors = [{ name = "Hidemi Watanabe", email = "watanabe@ist.hokudai.ac.jp" }]
 keywords = ["text-to-speech", "voice-cloning", "powerpoint", "education-technology", "speech-synthesis"]
 classifiers = [
@@ -41,4 +41,5 @@ Homepage = "https://github.com/profhw2/pptx_narrator"
 Issues = "https://github.com/profhw2/pptx_narrator/issues"
 
 [tool.setuptools]
+package-dir = {"" = "src"}
 py-modules = ["pptx_narrator"]

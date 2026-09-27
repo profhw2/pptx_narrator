@@ -4,7 +4,7 @@ Run from the repository root:  python tests/smoke_test.py
 Requires: python-pptx, pydub (+ FFmpeg), numpy, soundfile, py3langid.
 """
 import os, sys, types, tempfile, csv, zipfile, re, io, contextlib, argparse, json, shutil
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import pptx_narrator as pn
 from pptx import Presentation
 from pydub import AudioSegment
