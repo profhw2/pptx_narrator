@@ -149,6 +149,7 @@ Files made for each workspace:
 - `note_baseline.json`: the fingerprint of each note as `extract` read it and as `pack` wrote it, per language, so that an edit in the deck or in the workspace can be told apart.
 - `translations.json`: which version of the source text each translation was made from, and when.
 - `audio_sources.json`: which version of the text (and of the dictionaries) each audio file was made from.
+- `slide_map.json`: the number and ID of each slide of the deck the workspace follows (see below); `map_archive/`: what `map --apply` set aside.
 - `pptx_narrator.log`: everything each run logged, appended run by run.
 - `.pptx_narrator_history.jsonl` and `.pptx_narrator_resolved.toml`: the record of the runs (see Configuration).
 
@@ -183,6 +184,8 @@ A four-column dictionary (`Term,Japanese_Reading,English_Reading,Type`) from an 
 
 Audio is embedded in the same structure PowerPoint uses for recorded narration: the audio starts with the slide, is hidden during the show, and the slide advances automatically after the audio length. Slides without audio get a new narration object (a small speaker icon, visible only in the editor). If a slide already has audio (e.g. an earlier recording), that object is reused: it points to the new audio, and its trim, fade and bookmarks are removed. Audio is always written when it is asked for, since it is made from the text and never edited by hand; with `--update`, a slide that already plays the same audio is left as it is. Each slide gets its own media file, so copied slides that shared one clip no longer overwrite each other, and clips no longer used are removed from the file. Slides that have animations but no audio are reported and left unchanged; insert any audio clip on such a slide in PowerPoint and pack again. The slide advances by itself one second after the narration ends, so that the last word is not clipped in a video; `--slide-pause` changes that pause. The audio icon of a narrated slide is parked next to the slide, outside the visible area, so that it does not cover the slide content while editing; `--keep-audio-icon` leaves it where it is. The icon is hidden during the slide show either way.
 
+`pack` does not change the deck's own slide-show settings. A slide show plays the narration only when *Play Narrations* is on, and advances with it only when *Use Timings* is on (Slide Show tab in PowerPoint); `pack` warns when either is off in the deck, so that it can be turned on in the packed deck. A video exported with *Use Recorded Timings and Narrations* includes both either way.
+
 A slide plays one audio. When the workspace holds audio of several languages, `--lang` chooses it; when it holds none of the chosen language, `pack` says so and writes the texts only (a slide can then be recorded in PowerPoint). If a text was edited after its audio was made, `pack` warns that the audio does not say the text.
 
 Data recorded together with the old audio is also removed from a narrated slide, because its timing belongs to that audio: the laser-pointer path (`p14:laserTraceLst`) and the recorded play/pause/seek events (`p14:showEvtLst`). `--remove-recorded pointer|events|none` narrows or disables this (default: `all`). Ink annotations are kept and reported: ink drawn during a recording cannot be told apart from ink drawn while editing, which belongs to the slide, so the present version removes neither. The packed deck can be exported as MP4 with PowerPoint's *Export* (use recorded timings and narrations).
@@ -210,6 +213,14 @@ The heading says how a text was made: `translated from` the source language, whe
 
 `extract` follows the same rule: a text already in the workspace is replaced only with `--update` (when the note in the deck changed and the text was not edited in the workspace) or `--overwrite`; otherwise it is kept, with a warning.
 
+## Slides inserted, deleted or reordered
+
+The texts, audio and records of a workspace are kept by slide number, and inserting, deleting or reordering slides in PowerPoint changes the numbers of the slides after them. PowerPoint gives every slide an ID that stays the same when other slides move, and `extract`, `pack` and `map` record these IDs. Before they read or write a deck, `extract` and `pack` check that its slides still correspond to the workspace; if they do not, they stop without changing anything.
+
+`pptx-narrator ws map lecture.pptx` shows how the slides of the deck correspond to the workspace: which slides moved, which are no longer in the deck (deleted, or hidden), and which are new. Nothing is changed. With `--apply`, the workspace is renumbered to follow the deck: the texts, audio and records of moved slides get their new numbers, and the files of slides no longer in the deck, together with the log and the ASR reports that speak of the old numbers, are set aside in `map_archive/<date_time>/` with a `mapping.txt` that lists what was done. Nothing is deleted. The new slides are then taken in with commands that `map` suggests (`extract --slides …` and so on).
+
+A workspace made before slide IDs were recorded is matched by the fingerprints of its notes, and what is left by the similarity of the texts. To write the narration into another version of the deck, such as one with the slide text in another language, make that version with *Save As*, which keeps the slide IDs.
+
 ## Command-line reference
 
 ```
@@ -226,6 +237,7 @@ pptx-narrator WS COMMAND [INPUT] [OUTPUT] [OPTIONS]
 - `synthesize`: `--lang`, `--dict-file` (readings), `--letter-map`, `--ref-wav`, `--ref-text` (a text file with the transcript), `--ref-lang`, `--engine {gpt_sovits,qwen3}` (default qwen3), `--model`, `--qwen3-model-size {0.6B,1.7B}` (default 1.7B), `--qwen3-device`, `--api-url`, `--enable-drc`, `--drc-threshold`, `--drc-ratio`.
 - `verify`: `--lang`, `--engine`, `--model`, `--qwen3-model-size`, `--asr-model`, `--asr-device`, `--verify-threshold` (default 0.85), `--min-difference` (default 4), `--max-difference` (default 40; `0` disables), `--cer-threshold` (default off).
 - `pack DECK OUT`: `--lang`, `--data-type {text,audio,all}` (default all), `--engine`, `--model`, `--qwen3-model-size`, `--update`, `--overwrite`, `--slide-pause` (default 1.0 s), `--keep-audio-icon`, `--remove-recorded {all,pointer,events,none}` (default `all`).
+- `map DECK`: how the slides of `DECK` correspond to the workspace; `--apply` renumbers the workspace to follow `DECK`.
 - `history`: the commands run in the workspace; `--dates` adds when.
 
 The options of a command come after the command, in any order. `--config FILE` and `--version` may also come before it. Run `pptx-narrator WS COMMAND --help` for the full list. Underscore spellings (`--dict_file`, `--in_lang`, …) are also accepted, and any option may be typed as short as it stays unambiguous (`--data text` for `--data-type text`; `--ref-t my_voice.txt` for `--ref-text`, since `--ref-wav` and `--ref-lang` also start with `--ref-`).
@@ -285,6 +297,7 @@ The step writes two files. `verify_differences_<lang>.<model>.csv` lists every p
 ## Planned work
 
 - Narration of slides that have animations but no audio object (the audio has to be placed in the slide's animation timeline).
+- Writing into a deck whose slides differ from those of the workspace, only the slides matched by slide ID, when asked with an option of `pack`.
 - Translation with the whole deck as context, which favours a free translation that keeps the meaning; the translation dictionary would then serve mainly to keep terminology consistent.
 - Comparison on the reading for Chinese (e.g. pinyin), as is done with katakana for Japanese, so that simplified or traditional characters and homophones written by the ASR are not counted as differences.
 

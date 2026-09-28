@@ -611,7 +611,7 @@ a = parser.parse_args(["ws", "translate", "--in_lang", "JA", "--out-lang", "zh_c
 ok(a.workspace == "ws" and a.command == "translate" and a.in_lang == "ja" and a.out_lang == "zh-CN"
    and a.dict_file == ["a.csv", "b.csv"], "CLI normalization, aliases, repeatable --dict-file")
 
-positionals = {"extract": [deck], "scan": ["d.csv"], "pack": [deck, "o.pptx"]}
+positionals = {"extract": [deck], "scan": ["d.csv"], "pack": [deck, "o.pptx"], "map": [deck]}
 ok([c for c in pn.COMMANDS if parser.parse_args(["ws", c] + positionals.get(c, [])).command != c] == [],
    "every pipeline step is a command of its own, after the workspace")
 a = parser.parse_args(["ws", "pack", deck, "o.pptx", "--lang", "ja"])
@@ -878,5 +878,97 @@ ok(parser.parse_args(["ws", "synthesize", "--dic", "x.csv"]).dict_file == ["x.cs
    "an abbreviation is not ambiguous against the option's own underscore spelling")
 ok(parser.parse_args(["ws", "synthesize", "--dict-file=z.csv"]).dict_file == ["z.csv"],
    "--option=value works together with the underscore spelling")
+
+# ------------------------------------------------ slides inserted, deleted or reordered: map
+def make_deck(path, notes):
+    prs_ = Presentation()
+    for text in notes:
+        sl = prs_.slides.add_slide(prs_.slide_layouts[6])
+        sl.notes_slide.notes_text_frame.text = text
+    prs_.save(path)
+
+NOTES = ["The first slide explains how genomes are sequenced and assembled from short reads.",
+         "The second slide shows how transcription factors bind to promoters and enhancers.",
+         "The third slide compares the error rates of several long-read sequencing platforms."]
+deckA = os.path.join(cli_cwd, "mapA.pptx"); make_deck(deckA, NOTES)
+p_ = Presentation(deckA); lst = p_.slides._sldIdLst; el = lst[2]; lst.remove(el); lst.insert(0, el)
+deckR = os.path.join(cli_cwd, "mapR.pptx"); p_.save(deckR)             # third slide moved to the front
+p_ = Presentation(deckR); lst = p_.slides._sldIdLst; lst.remove(lst[1])
+deckD = os.path.join(cli_cwd, "mapD.pptx"); p_.save(deckD)             # then the old first slide deleted
+
+def run_quiet(argv):
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            pn.main(argv)
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+    return code, out.getvalue() + err.getvalue()
+
+wsM = os.path.join(cli_cwd, "wsM")
+code, _ = run_quiet(["wsM", "extract", deckA, "--lang", "en"])
+recorded = json.load(open(os.path.join(wsM, pn.SLIDE_MAP), encoding="utf-8"))
+ok(code == 0 and [s_["number"] for s_ in recorded["slides"]] == [1, 2, 3]
+   and read(os.path.join(wsM, "slide_3_en.txt")) == NOTES[2],
+   "extract records the slide IDs of the deck")
+logs.clear()
+code, _ = run_quiet(["wsM", "pack", deckR, "outR.pptx", "--data-type", "text"])
+ok(code == 1 and not os.path.exists(os.path.join(cli_cwd, "outR.pptx"))
+   and any("differs in its slides from the deck extracted" in m for m in logs),
+   "pack stops when the slides of the deck no longer correspond to the workspace")
+logs.clear()
+code, _ = run_quiet(["wsM", "extract", deckR, "--lang", "en"])
+ok(code == 1 and any("no longer correspond to this workspace" in m for m in logs)
+   and read(os.path.join(wsM, "slide_1_en.txt")) == NOTES[0],
+   "extract stops too, and changes nothing")
+code, said = run_quiet(["wsM", "map", deckR])
+ok(code == 0 and "slide 3 -> 1 (matched by slide ID)" in said and "Nothing was changed" in said
+   and read(os.path.join(wsM, "slide_1_en.txt")) == NOTES[0],
+   "map shows how the slides moved and changes nothing without --apply")
+code, said = run_quiet(["wsM", "map", deckR, "--apply"])
+archives = os.listdir(os.path.join(wsM, pn.MAP_ARCHIVE))
+base = pn._load_note_baseline(wsM)
+ok(code == 0 and read(os.path.join(wsM, "slide_1_en.txt")) == NOTES[2]
+   and read(os.path.join(wsM, "slide_2_en.txt")) == NOTES[0]
+   and read(os.path.join(wsM, "slide_3_en.txt")) == NOTES[1]
+   and base["1"]["langs"]["en"]["extracted"] == pn.text_fingerprint(NOTES[2])
+   and len(archives) == 1 and os.path.exists(os.path.join(wsM, pn.MAP_ARCHIVE, archives[0], "mapping.txt"))
+   and os.path.exists(os.path.join(wsM, pn.MAP_ARCHIVE, archives[0], pn.LOG_FILE)),
+   "map --apply renumbers the texts and records, and sets the old log aside")
+code, _ = run_quiet(["wsM", "extract", deckR, "--lang", "en"])
+ok(code == 0, "after map --apply, extract runs on the reordered deck")
+import time as _t; _t.sleep(1.1)
+code, said = run_quiet(["wsM", "map", deckD, "--apply"])
+arch = sorted(os.listdir(os.path.join(wsM, pn.MAP_ARCHIVE)))[-1]
+ok(code == 0 and read(os.path.join(wsM, "slide_2_en.txt")) == NOTES[1]
+   and not os.path.exists(os.path.join(wsM, "slide_3_en.txt"))
+   and read(os.path.join(wsM, pn.MAP_ARCHIVE, arch, "unused_slides", "slide_2_en.txt")) == NOTES[0],
+   "the files of a deleted slide are set aside, not deleted")
+wsL = os.path.join(cli_cwd, "wsL")
+run_quiet(["wsL", "extract", deckA, "--lang", "en"])
+os.remove(os.path.join(wsL, pn.SLIDE_MAP))
+plan = pn.plan_slide_map(wsL, deckR)
+ok(plan["changed"] == {1: 2, 2: 3, 3: 1} and all("note fingerprint" in plan["how"][o] for o in (1, 2, 3)),
+   "a workspace without recorded slide IDs is matched by the fingerprints of its notes")
+
+# the Slide Show settings of the deck that pack writes into
+def with_show_pr(src, dst, show_pr):
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "ppt/presProps.xml":
+                data = re.sub(rb"<p:showPr\b[^>]*/>|<p:showPr\b[^>]*>.*?</p:showPr>", b"", data, flags=re.S)
+                data = data.replace(b"</p:presentationPr>", show_pr.encode() + b"</p:presentationPr>")
+            zout.writestr(item, data)
+deckS1 = os.path.join(cli_cwd, "show1.pptx"); with_show_pr(deckA, deckS1, '<p:showPr useTimings="0"/>')
+deckS2 = os.path.join(cli_cwd, "show2.pptx"); with_show_pr(deckA, deckS2, '<p:showPr showNarration="1"/>')
+ok(pn.show_settings(deckS1) == (False, False) and pn.show_settings(deckS2) == (True, True),
+   "the Slide Show settings are read as PowerPoint writes them (showNarration off and useTimings on when absent)")
+logs.clear(); pn.warn_show_settings(deckS1)
+ok(any("'Play Narrations'" in m for m in logs) and any("'Use Timings'" in m for m in logs),
+   "pack warns when narrations or timings are off in the deck")
+logs.clear(); pn.warn_show_settings(deckS2)
+ok(not logs, "and says nothing when both are on")
 
 print("ALL TESTS PASSED")

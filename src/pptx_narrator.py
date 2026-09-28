@@ -1998,6 +1998,36 @@ def audio_is_older_than_text(workspace_dir, s_num, lang, model_label, record=Non
     return text_fingerprint(text) != entry.get("text_fingerprint")
 
 
+def show_settings(deck_path):
+    """(play narrations, use timings) as set in the Slide Show tab of a deck.
+
+    They are the showNarration and useTimings attributes of p:showPr in ppt/presProps.xml;
+    when absent, showNarration is off and useTimings is on (ECMA-376).
+    """
+    try:
+        with zipfile.ZipFile(deck_path) as z:
+            xml = z.read("ppt/presProps.xml").decode("utf-8", "replace")
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return None, None
+    m = re.search(r"<p:showPr\b([^>]*)>", xml) or re.search(r"<p:showPr\b([^>]*)/>", xml)
+    attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1))) if m else {}
+    narration = attrs.get("showNarration", "0").lower() in ("1", "true")
+    timings = attrs.get("useTimings", "1").lower() not in ("0", "false")
+    return narration, timings
+
+
+def warn_show_settings(deck_path):
+    narration, timings = show_settings(deck_path)
+    name = os.path.basename(deck_path)
+    if narration is False:
+        logger.warning(f"In {name}, 'Play Narrations' (Slide Show tab) is off, so the narration is not played in a "
+                       "slide show; turn it on in the packed deck. (A video exported with 'Use Recorded Timings "
+                       "and Narrations' includes it either way.)")
+    if timings is False:
+        logger.warning(f"In {name}, 'Use Timings' (Slide Show tab) is off, so the slides do not advance with the "
+                       "narration in a slide show; turn it on in the packed deck.")
+
+
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
                    targets=None, update=False, overwrite=False, audio_lang="same",
                    remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
@@ -2763,7 +2793,7 @@ def _apply_cli_config_defaults(namespace, config_values):
             setattr(namespace, key, value)
 
 
-COMMANDS = ("extract", "scan", "translate", "synthesize", "verify", "pack", "history")
+COMMANDS = ("extract", "scan", "translate", "synthesize", "verify", "pack", "map", "history")
 
 SLIDES_HELP = "Slide selection, e.g. 1-5 or 1,3,5- (default: every slide)"
 
@@ -2932,6 +2962,18 @@ def build_parser(config_values=None):
          help="Settings of a previous recording to remove: trim/fade/bookmarks,\nlaser-pointer path, playback events (default: all)")
     _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
+    # ---- map ------------------------------------------------------------
+    p = sub.add_parser("map", help="Check that the slides of a PPTX still correspond to WS",
+                       description="Show how the slides of DECK correspond to those of WS, matched by the\n"
+                                   "slide IDs PowerPoint keeps when slides are inserted, deleted or reordered.\n"
+                                   "Nothing is changed unless --apply is given.",
+                       formatter_class=HelpFormatter)
+    p.add_argument("deck", metavar="DECK", help="PPTX file whose slides WS should follow")
+    _add(p, "--apply", dest="apply", action="store_true", default=None,
+         help="Renumber WS to follow DECK; files of slides no longer in DECK, and the log\n"
+              "and ASR reports that speak of the old numbers, are set aside in map_archive/")
+    _add(p, "--slides", dest="slides", default=None, help=argparse.SUPPRESS)
+
     # ---- history --------------------------------------------------------
     p = sub.add_parser("history", help="List the commands run in WS",
                        description="List the commands run in WS, oldest first, with the files they read\n"
@@ -2967,6 +3009,7 @@ def _defaults():
             "min_difference": 4, "max_difference": 40, "cer_threshold": None, "slides": None,
         },
         "history": {"dates": False},
+        "map": {"apply": False},
         "pack": {
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
             "data_type": "all", "slides": None, "update": False, "overwrite": False,
@@ -3181,7 +3224,7 @@ def main(argv=None):
     effective = _validate_and_normalize(command, effective, parser)
 
     deck = out = dict_out = None
-    if command in {"extract", "pack"}:
+    if command in {"extract", "pack", "map"}:
         deck = os.path.abspath(args.deck)
         if not os.path.isfile(deck) or not deck.lower().endswith(".pptx"):
             parser.error(f"{command} DECK must be a PPTX file: {args.deck}")
@@ -3207,14 +3250,18 @@ def main(argv=None):
         raise SystemExit(130)
     except Exception as e:
         logger.error(f"{command} failed: {_describe_error(e)}")
-        log_handler.stream.write(traceback.format_exc())
-        log_handler.flush()
+        for h in logger.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.stream.write(traceback.format_exc())
+                h.flush()
         _record_failure(ws, command, f"{type(e).__name__}: {e}")
         print(f"pptx-narrator {command}: the details are in {os.path.join(ws, LOG_FILE)}", file=sys.stderr)
         raise SystemExit(1)
     finally:
-        logger.removeHandler(log_handler)
-        log_handler.close()
+        for h in list(logger.handlers):
+            if isinstance(h, logging.FileHandler):
+                logger.removeHandler(h)
+                h.close()
 
 
 def _describe_error(e):
@@ -3235,8 +3282,10 @@ def _record_failure(ws, command, reason):
 
 def _run_command(command, args, effective, config, config_path, parser, ws):
     before = _workspace_files(ws)
-    deck = os.path.abspath(args.deck) if command in {"extract", "pack"} else None
+    deck = os.path.abspath(args.deck) if command in {"extract", "pack", "map"} else None
     out = dict_out = None
+    if command in {"extract", "pack"}:
+        check_slide_map(ws, deck, command)
     audio_lang = effective.get("in_lang")
     if command == "pack" and "audio" in resolve_targets(effective.get("data_type")) and not audio_lang:
         # The texts of every language can go into one note, but a slide plays one audio.
@@ -3257,7 +3306,32 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
             parser.error("multiple audio model labels are present in this workspace: "
                          + ", ".join(labels) + ". Specify --engine (and model size if applicable).")
 
-    if command == "extract":
+    if command == "map":
+        plan = plan_slide_map(ws, deck)
+        lines = describe_slide_map(plan)
+        if plan["needs_apply"]:
+            _say("The slides of the deck no longer correspond to this workspace:")
+        else:
+            _say("The slides of the deck correspond to this workspace" + (":" if lines else "."))
+        for line in lines:
+            _say("  " + line)
+        if effective["apply"]:
+            if plan["needs_apply"]:
+                archive = apply_slide_map(ws, deck, plan)
+                _say(f"The workspace now follows the deck; what was set aside is in {archive}")
+            else:
+                save_slide_map(ws, deck, plan["prs"])
+        elif plan["needs_apply"]:
+            _say(f"Nothing was changed. To renumber the workspace: pptx-narrator {_q(args.workspace)} map "
+                 f"{_q(args.deck)} --apply")
+        if plan["new"] and (effective["apply"] or not plan["needs_apply"]):
+            sl = ",".join(map(str, plan["new"]))
+            w, d = f"pptx-narrator {_q(args.workspace)}", _q(args.deck)
+            _say("\nThe new slides can be taken in with the others, for example:")
+            _say(f"  {w} extract {d} --slides {sl}")
+            _say(f"  {w} synthesize --slides {sl} --lang <lang> --ref-wav \"ref.wav\" --ref-text \"ref.txt\"")
+            _say(f'  {w} pack {d} "narrated.pptx" --update')
+    elif command == "extract":
         prs = Presentation(deck)
         req_slides = sorted(parse_slide_ranges(effective.get("slides"), len(prs.slides)))
         langs = effective.get("in_lang")
@@ -3273,6 +3347,7 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
             missing = [lang for lang in langs if not step_extract_notes(deck, ws, req_slides, lang, **flags)]
             if missing:
                 parser.error("no note in " + ", ".join(missing) + " was found in " + os.path.basename(deck))
+        save_slide_map(ws, deck, prs)
     elif command == "scan":
         dict_out = os.path.abspath(args.dictionary)
         exists = os.path.exists(dict_out)
@@ -3386,12 +3461,15 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                 logger.warning(f"No {audio_lang} audio for model '{model_label}' was found"
                                + (f" (available model labels: {', '.join(available)})" if available else "")
                                + "; no audio is written.")
+        if "audio" in targets and audio_lang:
+            warn_show_settings(deck)
         step_pack_pptx(deck, out, ws, slides, effective.get("in_lang"), model_label,
                        targets=targets, update=effective["update"], overwrite=effective["overwrite"],
                        audio_lang=audio_lang,
                        remove_recorded=RECORDED_CHOICES[effective["remove_recorded"]],
                        icon_outside=not effective["keep_audio_icon"],
                        pause_ms=int(round(effective["slide_pause"] * 1000)))
+        save_slide_map(ws, deck)
 
     written = _files_written(ws, before)
     _suggest_next(command, args, effective, ws, deck=deck, out=out, dict_out=dict_out)
@@ -3400,7 +3478,7 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
 
 
 LOG_FILE = "pptx_narrator.log"
-_RECORD_FILES = {STATE_FILE, RESOLVED_CONFIG_FILE, ".pptx_narrator_history.jsonl", LOG_FILE}
+_RECORD_FILES = {STATE_FILE, RESOLVED_CONFIG_FILE, ".pptx_narrator_history.jsonl", LOG_FILE, "slide_map.json"}
 
 
 def _open_workspace_log(ws, argv):
@@ -3492,6 +3570,249 @@ def _report(command, ws, written, out=None, dict_out=None):
     _say(f"  log: {os.path.join(ws, LOG_FILE)}")
 
 
+# ------------------------------------------
+# Correspondence between the slides of a deck and a workspace
+# ------------------------------------------
+# The texts, audio and records of a workspace are keyed by slide number, which changes when
+# slides are inserted, deleted or reordered. PowerPoint gives every slide an ID that does not
+# change when others are moved, so extract, pack and map record the IDs of the deck, and a
+# later deck is matched against them. A workspace made before IDs were recorded is matched by
+# the fingerprints of the notes, and what is left by the similarity of the texts.
+SLIDE_MAP = "slide_map.json"
+MAP_ARCHIVE = "map_archive"
+_SLIDE_FILE_RE = re.compile(r"^slide_(\d+)(_.+)$")
+
+
+def _deck_slides(prs):
+    """[(number, slide_id, hidden, raw note text)] of a deck."""
+    out = []
+    for i, slide in enumerate(prs.slides, 1):
+        out.append((i, slide.slide_id, slide._element.get("show") == "0", _slide_note_raw(slide)))
+    return out
+
+
+def _load_slide_map(workspace_dir):
+    path = os.path.join(workspace_dir, SLIDE_MAP)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_slide_map(workspace_dir, deck_path, prs=None):
+    """Record the numbers and IDs of the slides of the deck the workspace now follows."""
+    prs = prs or Presentation(deck_path)
+    record = {"recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+              "slides": [{"number": n, "slide_id": sid, "hidden": hidden}
+                         for n, sid, hidden, _ in _deck_slides(prs)]}
+    with open(os.path.join(workspace_dir, SLIDE_MAP), "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=1)
+
+
+def _workspace_slide_numbers(workspace_dir):
+    """Slide numbers that have any file or record in the workspace."""
+    nums = set()
+    for name in os.listdir(workspace_dir):
+        m = _SLIDE_FILE_RE.match(name)
+        if m:
+            nums.add(int(m.group(1)))
+    for key in list(_load_note_baseline(workspace_dir)) + list(_load_manifest(workspace_dir)):
+        if str(key).isdigit():
+            nums.add(int(key))
+    return nums
+
+
+def _workspace_text(workspace_dir, n):
+    return "\n".join(_read_text(os.path.join(workspace_dir, name)) for name in sorted(os.listdir(workspace_dir))
+                     if _TEXT_FILE_RE.match(name) and int(_TEXT_FILE_RE.match(name).group(1)) == n)
+
+
+def plan_slide_map(workspace_dir, deck_path):
+    """How the slides of the workspace correspond to those of the deck.
+
+    Returns a dict: mapping {old: new} for every slide of the workspace found in the deck,
+    how each was matched, the old numbers not found (removed, hidden or unrecognizable), and
+    the new visible slides that the workspace has nothing for.
+    """
+    prs = Presentation(deck_path)
+    deck = _deck_slides(prs)
+    visible = {n: (sid, raw) for n, sid, hidden, raw in deck if not hidden}
+    hidden_now = {n for n, _, hidden, _ in deck if hidden}
+    ws_nums = _workspace_slide_numbers(workspace_dir)
+    recorded = _load_slide_map(workspace_dir)
+    mapping, how = {}, {}
+    free_new = set(visible)
+    if recorded:
+        by_id = {sid: n for n, (sid, _) in visible.items()}
+        old_ids = {s["number"]: s["slide_id"] for s in recorded["slides"]}
+        for old in sorted(ws_nums):
+            new = by_id.get(old_ids.get(old))
+            if new is not None and new in free_new:
+                mapping[old], how[old] = new, "slide ID"
+                free_new.discard(new)
+    if recorded is None:
+        # No IDs were recorded (a workspace made by an earlier version): a slide still at its
+        # number is taken to be the same slide unless an unchanged note shows it moved.
+        pass
+    # Unchanged notes: the fingerprint extract recorded, or the text in the workspace.
+    baseline = _load_note_baseline(workspace_dir)
+    fp_new = {}
+    for n in free_new:
+        fp_new.setdefault(text_fingerprint(visible[n][1]), []).append(n)
+    for old in sorted(ws_nums - set(mapping)):
+        entry = baseline.get(str(old), {})
+        fps = {entry.get("extracted"), entry.get("packed")} - {None}
+        candidates = sorted({n for fp in fps for n in fp_new.get(fp, []) if n in free_new})
+        if len(candidates) == 1:
+            mapping[old], how[old] = candidates[0], "note fingerprint"
+            free_new.discard(candidates[0])
+    # What is left: the similarity of the texts, one to one, best first.
+    pairs = []
+    for old in sorted(ws_nums - set(mapping)):
+        text = _workspace_text(workspace_dir, old)
+        if not text:
+            continue
+        for n in free_new:
+            note = visible[n][1]
+            if note:
+                r = difflib.SequenceMatcher(None, text, note).ratio()
+                if r >= 0.6:
+                    pairs.append((r, old, n))
+    for r, old, n in sorted(pairs, reverse=True):
+        if old not in mapping and n in free_new:
+            mapping[old], how[old] = n, f"text similarity {r:.2f}"
+            free_new.discard(n)
+    if recorded is None:
+        for old in sorted(ws_nums - set(mapping)):
+            if old in free_new:
+                mapping[old], how[old] = old, "same number (no slide IDs recorded yet)"
+                free_new.discard(old)
+    removed = sorted(ws_nums - set(mapping))
+    new_slides = sorted(n for n in free_new if visible[n][1])
+    changed = {o: n for o, n in mapping.items() if o != n}
+    return {"mapping": mapping, "how": how, "changed": changed, "removed": removed,
+            "hidden": sorted(o for o in removed if o in hidden_now), "new": new_slides,
+            "needs_apply": bool(changed or removed), "prs": prs}
+
+
+def describe_slide_map(plan):
+    lines = []
+    for old, new in sorted(plan["changed"].items()):
+        lines.append(f"slide {old} -> {new} (matched by {plan['how'][old]})")
+    for old in plan["removed"]:
+        lines.append(f"slide {old}: not in the deck"
+                     + (" (hidden now)" if old in plan["hidden"] else " (removed, or changed beyond recognition)")
+                     + "; its files would be set aside")
+    for n in plan["new"]:
+        lines.append(f"slide {n}: new in the deck; nothing in the workspace yet")
+    return lines
+
+
+def _rekey(record, mapping, removed):
+    """A record keyed by slide number, renumbered; the entries of removed slides apart."""
+    kept, gone = {}, {}
+    for key, value in record.items():
+        if str(key).isdigit() and int(key) in mapping:
+            kept[str(mapping[int(key)])] = value
+        elif str(key).isdigit() and int(key) in removed:
+            gone[key] = value
+        else:
+            kept[key] = value
+    return kept, gone
+
+
+def _renamed(name, mapping):
+    m = _SLIDE_FILE_RE.match(name)
+    if m and int(m.group(1)) in mapping:
+        return f"slide_{mapping[int(m.group(1))]}{m.group(2)}"
+    return name
+
+
+def apply_slide_map(workspace_dir, deck_path, plan):
+    """Renumber the workspace to follow the deck, setting aside what no longer applies."""
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    archive = os.path.join(workspace_dir, MAP_ARCHIVE, stamp)
+    unused = os.path.join(archive, "unused_slides")
+    os.makedirs(unused, exist_ok=True)
+    mapping, removed = plan["mapping"], set(plan["removed"])
+    # The log and the ASR reports speak of the old numbers.
+    for h in list(logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            logger.removeHandler(h)
+            h.close()
+    for name in os.listdir(workspace_dir):
+        if name == LOG_FILE or name.startswith(("verify_report", "verify_differences")):
+            shutil.move(os.path.join(workspace_dir, name), os.path.join(archive, name))
+    _reopen_workspace_log(workspace_dir)
+    # Files of slides no longer in the deck.
+    for name in sorted(os.listdir(workspace_dir)):
+        m = _SLIDE_FILE_RE.match(name)
+        if m and int(m.group(1)) in removed:
+            shutil.move(os.path.join(workspace_dir, name), os.path.join(unused, name))
+    # Renumber in two steps, so that no file is overwritten on the way.
+    moves = [(name, _renamed(name, mapping)) for name in os.listdir(workspace_dir)
+             if _SLIDE_FILE_RE.match(name) and _renamed(name, mapping) != name]
+    for old, _ in moves:
+        os.rename(os.path.join(workspace_dir, old), os.path.join(workspace_dir, ".remap_" + old))
+    for old, new in moves:
+        os.rename(os.path.join(workspace_dir, ".remap_" + old), os.path.join(workspace_dir, new))
+    # Records keyed by slide number, or by file name.
+    gone = {}
+    baseline, gone["note_baseline"] = _rekey(_load_note_baseline(workspace_dir), mapping, removed)
+    _save_note_baseline(workspace_dir, baseline)
+    manifest, gone["translations"] = _rekey(_load_manifest(workspace_dir), mapping, removed)
+    if manifest or os.path.exists(os.path.join(workspace_dir, TRANSLATION_MANIFEST)):
+        with open(os.path.join(workspace_dir, TRANSLATION_MANIFEST), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=1, sort_keys=True)
+    sources, gone["audio_sources"] = {}, {}
+    for audio, entry in _load_audio_sources(workspace_dir).items():
+        m = _SLIDE_FILE_RE.match(audio)
+        if m and int(m.group(1)) in removed:
+            gone["audio_sources"][audio] = entry
+            continue
+        entry = dict(entry, text=_renamed(entry.get("text", ""), mapping))
+        sources[_renamed(audio, mapping)] = entry
+    if sources or os.path.exists(os.path.join(workspace_dir, AUDIO_SOURCES)):
+        with open(os.path.join(workspace_dir, AUDIO_SOURCES), "w", encoding="utf-8") as f:
+            json.dump(sources, f, ensure_ascii=False, indent=1, sort_keys=True)
+    with open(os.path.join(archive, "removed_records.json"), "w", encoding="utf-8") as f:
+        json.dump(gone, f, ensure_ascii=False, indent=1, sort_keys=True)
+    with open(os.path.join(archive, "mapping.txt"), "w", encoding="utf-8") as f:
+        f.write(f"Workspace renumbered to follow {deck_path} on {stamp}.\n\n")
+        f.write("\n".join(describe_slide_map(plan)) + "\n")
+    save_slide_map(workspace_dir, deck_path, plan["prs"])
+    return archive
+
+
+def _reopen_workspace_log(workspace_dir):
+    handler = logging.FileHandler(os.path.join(workspace_dir, LOG_FILE), encoding="utf-8")
+    handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    logger.info("==== the earlier log was moved to map_archive/ when the workspace was renumbered")
+
+
+def check_slide_map(workspace_dir, deck_path, command):
+    """Before extract or pack: stop if the deck no longer corresponds to the workspace."""
+    if not _workspace_slide_numbers(workspace_dir):
+        return None
+    plan = plan_slide_map(workspace_dir, deck_path)
+    if not plan["needs_apply"]:
+        return plan
+    for line in describe_slide_map(plan):
+        logger.warning(line)
+    _record_failure(workspace_dir, command, "the slides of the deck do not correspond to the workspace")
+    if command == "pack":
+        logger.error(f"{os.path.basename(deck_path)} differs in its slides from the deck extracted into this "
+                     "workspace; nothing was written. If the slides were inserted, deleted or reordered in this "
+                     "deck, renumber the workspace first: pptx-narrator "
+                     f"{shlex.quote(workspace_dir)} map {shlex.quote(deck_path)} --apply")
+    else:
+        logger.error("The slides of the deck no longer correspond to this workspace. Renumber the workspace "
+                     f"first: pptx-narrator {shlex.quote(workspace_dir)} map {shlex.quote(deck_path)} --apply")
+    raise SystemExit(1)
+
+
+
 def show_history(ws, dates=False):
     """List the commands run in a workspace, from its history file."""
     path = os.path.join(ws, ".pptx_narrator_history.jsonl")
@@ -3537,7 +3858,7 @@ def _record_run(command, ws, effective, config_path, deck=None, out=None, dict_o
     """
     paths = {key: _rel_to_workspace(path, ws)
              for key, path in (("deck", deck), ("out", out), ("dictionary", dict_out)) if path}
-    input_path = deck if command in {"extract", "pack"} else ws
+    input_path = deck if command in {"extract", "pack", "map"} else ws
     try:
         snapshot = _input_snapshot(input_path, command)
     except RuntimeError:
