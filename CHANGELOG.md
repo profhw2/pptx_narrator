@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 – 2026-09-27
+## 1.0.1 – 2026-09-28
 
 - The synthesis log reports one ratio, the synthesis time divided by the duration of the audio ("synthesis took 1.93 x the audio duration"); the summary line used to give the inverse ("x real time").
 - `verify` marks a Japanese slide whose text still contains Latin-script words as `LATIN` (was `ENGLISH`): the kana comparison cannot score such words, whatever their language.
