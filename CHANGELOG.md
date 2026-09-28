@@ -1,13 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 – 2026-09-27
 
 - The synthesis log reports one ratio, the synthesis time divided by the duration of the audio ("synthesis took 1.93 x the audio duration"); the summary line used to give the inverse ("x real time").
 - `verify` marks a Japanese slide whose text still contains Latin-script words as `LATIN` (was `ENGLISH`): the kana comparison cannot score such words, whatever their language.
 - The instruction to the translation model speaks of the notes of a slide deck, not of a lecture.
 - `examples/terms_ja_en.csv`: a translation dictionary for Japanese notes narrated in English.
 - `examples/screening_check.py` takes the workspace first and `--lang`, like the commands (`screening_check.py WS --lang ja`); `--verify-threshold` names its threshold as in `verify`. The old option names still work.
-- README: how to tune the ASR check on one's own decks, option by option.
+- README: how to tune the ASR check on one's own decks, option by option; how to set up the TTS engines, including a GPT-SoVITS server on another computer.
 - The source is in `src/` (`src/pptx_narrator.py`) and the license in `LICENSE.txt`, as SoftwareX asks of the repositories of its articles; the installed command is unchanged.
 
 ## 1.0.0 – 2026-09-27

@@ -52,6 +52,24 @@ pip install -e ".[all]"     # everything
 This installs the `pptx-narrator` command. Running `python src/pptx_narrator.py ...` without installing also works (`pip install -r requirements.txt`).
 The `scan` command downloads the NLTK `stopwords` and `words` corpora on first use; if that fails behind a proxy, run `python -m nltk.downloader stopwords words`.
 
+## Setting up the TTS engines
+
+### Qwen3-TTS (default)
+
+`pip install -e ".[qwen3]"` installs the `qwen-tts` package and PyTorch. With an NVIDIA GPU, install the PyTorch build that matches your CUDA version first (see pytorch.org). The model weights (`Qwen/Qwen3-TTS-12Hz-0.6B-Base` or `-1.7B-Base`, chosen with `--qwen3-model-size`) are downloaded from Hugging Face on first use. `--qwen3-device` selects `cuda:0`, `mps` (Apple Silicon) or `cpu`; the default `auto` uses `cuda:0` if available, otherwise `mps`, otherwise `cpu`.
+
+### GPT-SoVITS
+
+GPT-SoVITS runs as a separate program, which PPTX-Narrator reaches through its HTTP API server.
+
+1. Install GPT-SoVITS by following its own instructions (https://github.com/RVC-Boss/GPT-SoVITS), preferably in an environment of its own, and download its pretrained models. The weights that `--model` selects must be in the GPT-SoVITS directory: `v2ProPlus` (the default) uses `GPT_SoVITS/pretrained_models/s1v3.ckpt` and `GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth`; `v4` and `v1_clear` use the files listed in `MODELS_CONFIG` in `src/pptx_narrator.py`.
+2. Start the API server in the GPT-SoVITS directory: `python api_v2.py -a 127.0.0.1 -p 9880`.
+3. Run `synthesize --engine gpt_sovits`; `--api-url` gives the server's address (default `http://127.0.0.1:9880/`). PPTX-Narrator switches the server to the weights of `--model` before synthesizing.
+
+The reference recording is passed to the server by its absolute path, and the server reads the file itself. When the server runs on another computer, the file given as `--ref-wav` must therefore exist at the same absolute path on that computer (a shared folder, or a copy at the same path).
+
+The GPT-SoVITS API server has no authentication of its own and, by default, accepts connections only from the same computer (127.0.0.1). Using it from another computer securely, for example over an SSH tunnel, is the user's responsibility; consult your network administrator where needed.
+
 ## Quick start
 
 To try the tool without preparing a deck, build the sample deck first; its notes contain acronyms, gene names and number-unit expressions in Japanese and English:
@@ -76,7 +94,7 @@ pptx-narrator ws scan readings_ja.csv --lang ja
 # 3. Synthesize with a cloned voice, then screen the result
 pptx-narrator ws synthesize --lang ja --dict-file readings_ja.csv \
   --engine qwen3 --ref-wav my_voice.wav --ref-text my_voice.txt
-pptx-narrator ws verify --lang ja --engine qwen3 --cer-threshold 0.15
+pptx-narrator ws verify --lang ja --engine qwen3
 
 # 4. Listen to the slides flagged in ws/verify_report_ja.qwen3-1.7B.csv, fix the
 #    dictionary or the texts, synthesize those slides again (--slides 4,7), then pack
@@ -308,7 +326,7 @@ The tool is maintained alongside teaching and research, so replies can take a wh
 
 ## Citation
 
-If you use PPTX-Narrator, please cite the archived release on Zenodo; its DOI is added here and to [`CITATION.cff`](CITATION.cff) with the v1.0.0 release. Changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
+If you use PPTX-Narrator, please cite the archived release on Zenodo: [10.5281/zenodo.22796544](https://doi.org/10.5281/zenodo.22796544) cites all versions and resolves to the latest; the DOI of each version is on that page and in [`CITATION.cff`](CITATION.cff). Changes between versions are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

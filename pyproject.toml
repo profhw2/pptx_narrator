@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pptx-narrator"
-version = "1.0.0"
+version = "1.0.1"
 description = "Automated voice-cloned narration of PowerPoint presenter notes with technical-term normalization and ASR verification"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE.txt"]
 authors = [{ name = "Hidemi Watanabe", email = "watanabe@ist.hokudai.ac.jp" }]
-keywords = ["text-to-speech", "voice-cloning", "powerpoint", "education-technology", "speech-synthesis"]
+keywords = ["text-to-speech", "voice-cloning", "machine-translation", "powerpoint", "narrated-presentation"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
