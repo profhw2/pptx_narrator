@@ -1998,36 +1998,6 @@ def audio_is_older_than_text(workspace_dir, s_num, lang, model_label, record=Non
     return text_fingerprint(text) != entry.get("text_fingerprint")
 
 
-def show_settings(deck_path):
-    """(play narrations, use timings) as set in the Slide Show tab of a deck.
-
-    They are the showNarration and useTimings attributes of p:showPr in ppt/presProps.xml;
-    when absent, showNarration is off and useTimings is on (ECMA-376).
-    """
-    try:
-        with zipfile.ZipFile(deck_path) as z:
-            xml = z.read("ppt/presProps.xml").decode("utf-8", "replace")
-    except (KeyError, zipfile.BadZipFile, OSError):
-        return None, None
-    m = re.search(r"<p:showPr\b([^>]*)>", xml) or re.search(r"<p:showPr\b([^>]*)/>", xml)
-    attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1))) if m else {}
-    narration = attrs.get("showNarration", "0").lower() in ("1", "true")
-    timings = attrs.get("useTimings", "1").lower() not in ("0", "false")
-    return narration, timings
-
-
-def warn_show_settings(deck_path):
-    narration, timings = show_settings(deck_path)
-    name = os.path.basename(deck_path)
-    if narration is False:
-        logger.warning(f"In {name}, 'Play Narrations' (Slide Show tab) is off, so the narration is not played in a "
-                       "slide show; turn it on in the packed deck. (A video exported with 'Use Recorded Timings "
-                       "and Narrations' includes it either way.)")
-    if timings is False:
-        logger.warning(f"In {name}, 'Use Timings' (Slide Show tab) is off, so the slides do not advance with the "
-                       "narration in a slide show; turn it on in the packed deck.")
-
-
 def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, lang, model_label,
                    targets=None, update=False, overwrite=False, audio_lang="same",
                    remove_recorded=("pointer", "events"), icon_outside=True, pause_ms=1000):
@@ -3461,8 +3431,6 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                 logger.warning(f"No {audio_lang} audio for model '{model_label}' was found"
                                + (f" (available model labels: {', '.join(available)})" if available else "")
                                + "; no audio is written.")
-        if "audio" in targets and audio_lang:
-            warn_show_settings(deck)
         step_pack_pptx(deck, out, ws, slides, effective.get("in_lang"), model_label,
                        targets=targets, update=effective["update"], overwrite=effective["overwrite"],
                        audio_lang=audio_lang,

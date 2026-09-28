@@ -3,7 +3,6 @@
 ## Unreleased
 
 - `map DECK` shows how the slides of a deck correspond to the workspace, matched by the slide IDs PowerPoint keeps when slides are inserted, deleted or reordered (a workspace made before the IDs were recorded is matched by the fingerprints of its notes and the similarity of its texts). `--apply` renumbers the workspace to follow the deck, setting aside the files of slides no longer in it, and the log and ASR reports that speak of the old numbers, in `map_archive/<date_time>/`.
-- `pack` warns when *Play Narrations* or *Use Timings* is off in the deck, since a slide show then does not play the narration or advance with it; the setting itself is left as it is.
 - `extract`, `pack` and `map --apply` record the slide IDs of the deck (`slide_map.json`). `extract` and `pack` stop, changing nothing, when the slides of the deck no longer correspond to the workspace.
 
 ## 1.0.1 – 2026-09-28

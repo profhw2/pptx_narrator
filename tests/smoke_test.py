@@ -952,23 +952,4 @@ plan = pn.plan_slide_map(wsL, deckR)
 ok(plan["changed"] == {1: 2, 2: 3, 3: 1} and all("note fingerprint" in plan["how"][o] for o in (1, 2, 3)),
    "a workspace without recorded slide IDs is matched by the fingerprints of its notes")
 
-# the Slide Show settings of the deck that pack writes into
-def with_show_pr(src, dst, show_pr):
-    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "ppt/presProps.xml":
-                data = re.sub(rb"<p:showPr\b[^>]*/>|<p:showPr\b[^>]*>.*?</p:showPr>", b"", data, flags=re.S)
-                data = data.replace(b"</p:presentationPr>", show_pr.encode() + b"</p:presentationPr>")
-            zout.writestr(item, data)
-deckS1 = os.path.join(cli_cwd, "show1.pptx"); with_show_pr(deckA, deckS1, '<p:showPr useTimings="0"/>')
-deckS2 = os.path.join(cli_cwd, "show2.pptx"); with_show_pr(deckA, deckS2, '<p:showPr showNarration="1"/>')
-ok(pn.show_settings(deckS1) == (False, False) and pn.show_settings(deckS2) == (True, True),
-   "the Slide Show settings are read as PowerPoint writes them (showNarration off and useTimings on when absent)")
-logs.clear(); pn.warn_show_settings(deckS1)
-ok(any("'Play Narrations'" in m for m in logs) and any("'Use Timings'" in m for m in logs),
-   "pack warns when narrations or timings are off in the deck")
-logs.clear(); pn.warn_show_settings(deckS2)
-ok(not logs, "and says nothing when both are on")
-
 print("ALL TESTS PASSED")
