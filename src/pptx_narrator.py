@@ -28,7 +28,7 @@ from pydub import AudioSegment
 import nltk
 from pydub.effects import compress_dynamic_range, normalize
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 
 def _ensure_nltk_data():

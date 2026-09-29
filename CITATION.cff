@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "PPTX-Narrator: Narrated slides and videos from the notes in a PowerPoint deck, in a cloned voice and multiple languages"
+title: "PPTX-Narrator: Narrating PowerPoint decks automatically from presenter notes edited and managed as text, in a cloned voice and multiple languages"
 message: "If you use this software, please cite it as below."
 type: software
 authors:
@@ -24,5 +24,5 @@ keywords:
   - powerpoint
   - narrated-presentation
 license: MIT
-version: 1.0.1
-date-released: 2026-09-28
+version: 1.1.0
+date-released: 2026-09-29
