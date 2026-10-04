@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `synthesize` no longer makes existing audio again unless asked, like the other commands. `--update` makes again the slides whose reading changed since their audio was made — the text was edited, or a dictionary changed how it is read, both seen in the fingerprint of the reading now recorded in `audio_sources.json`; `--edited-texts-only` leaves out the slides changed only by a dictionary. `--overwrite` makes every selected slide again. Audio made by an earlier version, without a record, is left as it is with `--update`.
+- `synthesize --dry-run` lists the slides that would be synthesized, with the reason, and synthesizes nothing.
+- `pptx-narrator --help` ends with examples: narration in the language of the notes, an English version, updating after edits, and renumbering after slides were inserted, deleted or reordered.
+- With Qwen3-TTS, the silence the model leaves at the start and end of each sentence is cut and the sentences are joined with a pause of fixed length, so that the pause no longer varies from one sentence to the next: `--sentence-pause` (default 0.5 s) and `--paragraph-pause` (default 0.5 s; a paragraph ends at a blank line in the text).
+
 ## 1.1.0 – 2026-09-29
 
 - `map DECK` shows how the slides of a deck correspond to the workspace, matched by the slide IDs PowerPoint keeps when slides are inserted, deleted or reordered (a workspace made before the IDs were recorded is matched by the fingerprints of its notes and the similarity of its texts). `--apply` renumbers the workspace to follow the deck, setting aside the files of slides no longer in it, and the log and ASR reports that speak of the old numbers, in `map_archive/<date_time>/`.

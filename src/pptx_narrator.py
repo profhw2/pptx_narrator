@@ -1355,6 +1355,43 @@ def split_into_chunks(text):
     parts = re.split(r'(?<=[。！？])|(?<=[.!?])\s+', text)
     return [p.strip() for p in parts if p and p.strip()]
 
+def split_into_paragraph_chunks(text):
+    """[(sentence, ends a paragraph?)]: paragraphs are separated by a blank line; a single
+    line break, as when a note puts one sentence per line, does not end a paragraph."""
+    out = []
+    for para in re.split(r"\n[ \t\u3000]*\n", text):
+        chunks = split_into_chunks(para)
+        out.extend((c, i == len(chunks) - 1) for i, c in enumerate(chunks))
+    return out
+
+
+def trim_silence(wav, sample_rate, margin=0.05, rel=0.01):
+    """The audio without the silence at its start and end (below rel times the peak),
+    keeping margin seconds so that a soft first or last sound is not cut."""
+    import numpy as np
+    if len(wav) == 0:
+        return wav
+    level = np.abs(wav)
+    loud = np.nonzero(level > rel * float(level.max()))[0]
+    if len(loud) == 0:
+        return wav[:0]
+    keep = int(margin * sample_rate)
+    return wav[max(0, loud[0] - keep):min(len(wav), loud[-1] + 1 + keep)]
+
+
+def join_sentences(wavs, ends_paragraph, sample_rate, sentence_pause=0.5, paragraph_pause=0.5):
+    """Join the audio of the sentences with a pause of fixed length between them, so that
+    the pause does not depend on how much silence the model happened to generate."""
+    import numpy as np
+    parts = []
+    for i, w in enumerate(wavs):
+        parts.append(trim_silence(w, sample_rate))
+        if i < len(wavs) - 1:
+            pause = paragraph_pause if ends_paragraph[i] else sentence_pause
+            parts.append(np.zeros(int(round(pause * sample_rate)), dtype=w.dtype))
+    return np.concatenate(parts) if parts else np.zeros(0)
+
+
 # Qwen3-TTS 12Hz models emit 12 codec frames per second of audio, so a cap on the
 # number of new tokens is a cap on the duration.
 QWEN3_CODEC_HZ = 12
@@ -1436,6 +1473,8 @@ def step_generate_audio_qwen3(
     drc_threshold=-20.0,
     drc_ratio=3.0,
     letter_map=None,
+    sentence_pause=0.5,
+    paragraph_pause=0.5,
 ):
     logger.info("--- [Option: TTS / engine=qwen3] Generating Audio ---")
     language = qwen3_language(lang)
@@ -1482,7 +1521,8 @@ def step_generate_audio_qwen3(
                   "w", encoding="utf-8") as f:
             f.write(spoken_text)
 
-        chunks = split_into_chunks(spoken_text)
+        sentences = split_into_paragraph_chunks(spoken_text)
+        chunks = [c for c, _ in sentences]
         started = time.time()
         try:
             wavs = []
@@ -1520,7 +1560,8 @@ def step_generate_audio_qwen3(
                             f" ({len(w[0])/sr:.1f}s): '{chunk}'"
                         )
                 wavs.append(w[0])
-            combined = np.concatenate(wavs) if len(wavs) > 1 else wavs[0]
+            combined = join_sentences(wavs, [end for _, end in sentences], sr,
+                                      sentence_pause=sentence_pause, paragraph_pause=paragraph_pause)
 
             wav_p = os.path.join(workspace_dir, "temp_qwen3.wav")
             sf.write(wav_p, combined, sr)
@@ -1965,6 +2006,57 @@ def _load_audio_sources(workspace_dir):
     return {}
 
 
+def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, letter_map=None,
+                   update=False, overwrite=False, edited_only=False):
+    """Decide, per slide, whether synthesize makes its audio: [(slide, make?, reason)].
+
+    Without options only missing audio is made. --overwrite makes every selected slide again.
+    --update makes again the slides whose reading changed since their audio was made: the
+    text was edited, or a dictionary changed how it is read (both seen in the fingerprint of
+    the reading, which is the text after the dictionaries); with --edited-texts-only, only
+    the slides whose text was edited.
+    """
+    sources = _load_audio_sources(workspace_dir)
+    plan = []
+    for n in slides:
+        audio = audio_filename(n, lang, model_label)
+        if not os.path.exists(os.path.join(workspace_dir, audio)):
+            plan.append((n, True, "no audio yet"))
+            continue
+        if overwrite:
+            plan.append((n, True, "--overwrite"))
+            continue
+        if not update:
+            plan.append((n, False, "audio exists (--update or --overwrite makes it again)"))
+            continue
+        text = _read_text(os.path.join(workspace_dir, text_filename(n, lang))).strip()
+        rec = sources.get(audio)
+        if rec is None:
+            plan.append((n, False, "audio made by an earlier version, with no record of its text; "
+                                   "--overwrite --slides makes it again"))
+            continue
+        if rec.get("text_fingerprint") != text_fingerprint(text):
+            plan.append((n, True, "text edited"))
+            continue
+        if edited_only:
+            plan.append((n, False, "text not edited"))
+            continue
+        spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map).strip()
+        made_from = rec.get("spoken_fingerprint")
+        if made_from is None:
+            spoken_p = os.path.join(workspace_dir, spoken_filename(n, lang, model_label))
+            if not os.path.exists(spoken_p):
+                plan.append((n, False, "no record of the reading it was made from; --overwrite --slides "
+                                       "makes it again"))
+                continue
+            made_from = text_fingerprint(_read_text(spoken_p).strip())
+        if made_from != text_fingerprint(spoken):
+            plan.append((n, True, "reading changed by the dictionaries"))
+        else:
+            plan.append((n, False, "unchanged"))
+    return plan
+
+
 def record_audio_sources(workspace_dir, slides, lang, model_label, dictionary_paths, since):
     """Remember, for each audio file made in this run, the text (and dictionaries) it was
     made from, so that pack and verify can tell when the text has been edited since."""
@@ -1977,8 +2069,11 @@ def record_audio_sources(workspace_dir, slides, lang, model_label, dictionary_pa
         path = os.path.join(workspace_dir, audio)
         if not os.path.exists(path) or os.path.getmtime(path) < since:
             continue
+        spoken_p = os.path.join(workspace_dir, spoken_filename(n, lang, model_label))
         record[audio] = {"text": text_filename(n, lang),
                          "text_fingerprint": text_fingerprint(_read_text(os.path.join(workspace_dir, text_filename(n, lang)))),
+                         "spoken_fingerprint": (text_fingerprint(_read_text(spoken_p).strip())
+                                                if os.path.exists(spoken_p) else None),
                          "dictionary_fingerprint": dict_fp,
                          "made_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(os.path.getmtime(path)))}
         made.append(n)
@@ -2794,14 +2889,43 @@ def _add_model_options(p, what):
          help="Qwen3-TTS model size (default: 1.7B)")
 
 
+EXAMPLES = """WS comes first and COMMAND second; the options of a command may be given anywhere
+after COMMAND.
+
+Examples:
+  # Narrate a deck in the language of its notes (Japanese here)
+  pptx-narrator ws extract lecture.pptx
+  pptx-narrator ws scan readings_ja.csv --lang ja        # then review the readings
+  pptx-narrator ws synthesize --lang ja --dict-file readings_ja.csv \\
+      --ref-wav my_voice.wav --ref-text my_voice.txt
+  pptx-narrator ws verify --lang ja                      # slides most likely misread
+  pptx-narrator ws pack lecture.pptx lecture_narrated.pptx
+
+  # An English version from the Japanese notes
+  pptx-narrator ws scan terms_ja_en.csv --lang ja        # terms to translate
+  pptx-narrator ws translate --in-lang ja --out-lang en --dict-file terms_ja_en.csv
+  pptx-narrator ws synthesize --lang en --dict-file readings_en.csv \\
+      --ref-wav my_voice.wav --ref-text my_voice.txt
+  pptx-narrator ws pack lecture.pptx lecture_en.pptx --lang en
+
+  # After editing texts or a dictionary: see what would be made, then make it
+  pptx-narrator ws synthesize --lang ja --dict-file readings_ja.csv \\
+      --ref-wav my_voice.wav --ref-text my_voice.txt --update --dry-run
+  pptx-narrator ws synthesize ... --update               # same options, without --dry-run
+  pptx-narrator ws pack lecture.pptx lecture_narrated.pptx --update
+
+  # After inserting, deleting or reordering slides in PowerPoint
+  pptx-narrator ws map lecture.pptx                      # shows what changed
+  pptx-narrator ws map lecture.pptx --apply              # renumbers the workspace
+
+Options used every time (--ref-wav, --dict-file, ...) can be kept in pptx_narrator.toml."""
+
 def build_parser(config_values=None):
     parser = ArgumentParser(
         prog="pptx-narrator",
         usage="pptx-narrator WS COMMAND [INPUT] [OUTPUT] [options]",
         description=DESCRIPTION,
-        epilog="WS comes first and COMMAND second. The options of a command may be given\n"
-               "anywhere after COMMAND. Files inside WS are chosen with --lang, --slides and\n"
-               "the model options, not by path.",
+        epilog=EXAMPLES,
         formatter_class=HelpFormatter,
     )
     parser.add_argument("workspace", metavar="WS",
@@ -2865,7 +2989,8 @@ def build_parser(config_values=None):
     # ---- synthesize ------------------------------------------------------
     p = sub.add_parser("synthesize", help="Generate voice-cloned narration",
                        description="Generate narration audio from the texts of WS, in a voice cloned from\n"
-                                   "a short reference recording. Existing audio is replaced.",
+                                   "a short reference recording. Only missing audio is made unless --update\n"
+                                   "or --overwrite is given; --dry-run shows what would be made.",
                        formatter_class=HelpFormatter)
     _add_lang_options(p, "Language of the texts to read")
     _add(p, "--dict-file", dest="dict_file", action="append", default=None,
@@ -2885,6 +3010,20 @@ def build_parser(config_values=None):
          help="Level in dBFS above which --enable-drc compresses (default: -20.0)")
     _add(p, "--drc-ratio", dest="drc_ratio", type=float, default=None,
          help="Compression ratio used by --enable-drc (default: 3.0)")
+    _add(p, "--sentence-pause", dest="sentence_pause", type=float, default=None,
+         help="Seconds of silence between sentences, Qwen3-TTS (default: 0.5)")
+    _add(p, "--paragraph-pause", dest="paragraph_pause", type=float, default=None,
+         help="Seconds of silence between paragraphs (a blank line in the text), Qwen3-TTS\n(default: 0.5)")
+    _add(p, "--update", dest="update", action="store_true", default=None,
+         help="Make again the audio of slides whose reading changed since it was made:\n"
+              "the text was edited, or a dictionary changed how it is read")
+    _add(p, "--edited-texts-only", dest="edited_texts_only", action="store_true", default=None,
+         help="With --update: only slides whose text was edited, not those whose reading\n"
+              "changed through a dictionary")
+    _add(p, "--overwrite", dest="overwrite", action="store_true", default=None,
+         help="Make again the audio of every selected slide")
+    _add(p, "--dry-run", "--dryrun", dest="dry_run", action="store_true", default=None,
+         help="Show which slides would be synthesized, and why, without synthesizing")
     _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
     # ---- verify ----------------------------------------------------------
@@ -2971,7 +3110,8 @@ def _defaults():
             "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/", "slides": None,
             "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
             "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
-            "letter_map": None,
+            "letter_map": None, "update": False, "overwrite": False, "edited_texts_only": False,
+            "dry_run": False, "sentence_pause": 0.5, "paragraph_pause": 0.5,
         },
         "verify": {
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
@@ -3108,7 +3248,9 @@ def _validate_and_normalize(command, v, parser):
             parser.error("--lang cannot be 'auto'")
     if command in {"scan", "translate", "synthesize"} and isinstance(v.get("dict_file"), str):
         v["dict_file"] = [v["dict_file"]]
-    if command in {"extract", "scan", "translate", "pack"} and v.get("update") and v.get("overwrite"):
+    if command == "synthesize" and v.get("edited_texts_only") and not v.get("update"):
+        parser.error("--edited-texts-only works with --update")
+    if command in {"extract", "scan", "translate", "pack", "synthesize"} and v.get("update") and v.get("overwrite"):
         parser.error("--update and --overwrite cannot be combined")
     if command == "scan" and v.get("append") and v.get("overwrite"):
         parser.error("--append and --overwrite cannot be combined")
@@ -3364,6 +3506,21 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
             parser.error(f"no {effective['in_lang']} text was found in workspace: {ws}")
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         letter_map_data = load_letter_map(effective.get("letter_map"))
+        plan = plan_synthesis(ws, slides, effective["in_lang"], _model_label(effective), dictionaries,
+                              letter_map_data, update=effective["update"], overwrite=effective["overwrite"],
+                              edited_only=effective["edited_texts_only"])
+        to_make = [n for n, make, _ in plan if make]
+        verb = "would be synthesized" if effective["dry_run"] else "synthesized"
+        for n, make, why in plan:
+            logger.info(f"Slide #{n}: {verb if make else 'left as it is'} ({why}).")
+        if effective["dry_run"]:
+            _say(f"Dry run: {len(to_make)} slide(s) would be synthesized"
+                 + (f" ({', '.join(map(str, to_make))})" if to_make else "") + "; nothing was changed.")
+            return
+        if not to_make:
+            _say("No slide needs its audio made; nothing was synthesized.")
+            return
+        slides = to_make
         if effective["engine"] == "gpt_sovits":
             config_model = MODELS_CONFIG[effective["model"]]
             base_url = effective["api_url"].rstrip("/")
@@ -3380,7 +3537,9 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                                       effective["ref_text"], dictionaries, model_label,
                                       effective["qwen3_model_size"], effective["qwen3_device"],
                                       enable_drc=effective["enable_drc"], drc_threshold=effective["drc_threshold"],
-                                      drc_ratio=effective["drc_ratio"], letter_map=letter_map_data)
+                                      drc_ratio=effective["drc_ratio"], letter_map=letter_map_data,
+                                      sentence_pause=effective["sentence_pause"],
+                                      paragraph_pause=effective["paragraph_pause"])
         else:
             step_generate_audio(ws, slides, effective["in_lang"], effective["ref_wav"],
                                 effective["ref_text"], effective["ref_lang"], effective["api_url"],

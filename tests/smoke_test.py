@@ -843,8 +843,11 @@ def run_cli(argv):
     return out.getvalue(), status
 
 top, status = run_cli(["--help"])
-ok(status == 0 and top.count("extract") == 1,
+cmd_list = top.split("Commands:")[1].split("options:")[0]
+ok(status == 0 and all(cmd_list.count(f" {c_} ") == 1 for c_ in pn.COMMANDS),
    "--help lists every command once and is not an error")
+ok("Examples:" in top and "pptx-narrator ws map lecture.pptx --apply" in top
+   and "--update --dry-run" in top, "--help ends with examples of use")
 ok(run_cli(["--version"])[0].strip().endswith(pn.__version__)
    and run_cli(["--version"])[1] == 0,
    "--version prints the version instead of the help")
@@ -951,5 +954,67 @@ os.remove(os.path.join(wsL, pn.SLIDE_MAP))
 plan = pn.plan_slide_map(wsL, deckR)
 ok(plan["changed"] == {1: 2, 2: 3, 3: 1} and all("note fingerprint" in plan["how"][o] for o in (1, 2, 3)),
    "a workspace without recorded slide IDs is matched by the fingerprints of its notes")
+
+# ------------------------------------------------ synthesize: what is made again, and --dry-run
+wsS = os.path.join(cli_cwd, "wsS"); os.makedirs(wsS)
+lbl = "qwen3-1.7B"
+texts = {1: "CRISPR は道具です。", 2: "これは変わらない文です。", 3: "PCR で増やします。", 4: "まだ音声がない文です。"}
+for n_, tx in texts.items():
+    write(os.path.join(wsS, pn.text_filename(n_, "ja")), tx)
+dict_old = os.path.join(cli_cwd, "readS.csv"); write(dict_old, "string,replacement,type\nCRISPR,クリスパー,\n")
+ents = pn.load_dictionaries([dict_old], "ja")
+srcs = {}
+for n_ in (1, 2, 3):
+    write(os.path.join(wsS, pn.audio_filename(n_, "ja", lbl)), "audio")
+    sp = pn.apply_dictionary(texts[n_], ents, "ja").strip()
+    write(os.path.join(wsS, pn.spoken_filename(n_, "ja", lbl)), sp)
+    srcs[pn.audio_filename(n_, "ja", lbl)] = {"text": pn.text_filename(n_, "ja"),
+                                              "text_fingerprint": pn.text_fingerprint(texts[n_]),
+                                              "spoken_fingerprint": pn.text_fingerprint(sp)}
+write(os.path.join(wsS, pn.AUDIO_SOURCES), json.dumps(srcs))
+write(os.path.join(wsS, pn.text_filename(3, "ja")), "PCR で何度も増やします。")       # slide 3 edited
+dict_new = os.path.join(cli_cwd, "readS2.csv")
+write(dict_new, "string,replacement,type\nCRISPR,クリスパーキャス,\n")              # changes slide 1 only
+ents2 = pn.load_dictionaries([dict_new], "ja")
+def plan_of(**kw):
+    return {n_: (make, why) for n_, make, why in pn.plan_synthesis(wsS, [1, 2, 3, 4], "ja", lbl, ents2, **kw)}
+p0 = plan_of()
+ok([n_ for n_ in p0 if p0[n_][0]] == [4], "synthesize makes only missing audio by default")
+p1 = plan_of(update=True)
+ok([n_ for n_ in p1 if p1[n_][0]] == [1, 3, 4] and p1[1][1] == "reading changed by the dictionaries"
+   and p1[3][1] == "text edited" and p1[2][1] == "unchanged",
+   "--update makes again the slides whose text was edited or whose reading a dictionary changed")
+p2 = plan_of(update=True, edited_only=True)
+ok([n_ for n_ in p2 if p2[n_][0]] == [3, 4], "--edited-texts-only leaves out the slides changed only by a dictionary")
+p3 = plan_of(overwrite=True)
+ok(all(p3[n_][0] for n_ in p3), "--overwrite makes every selected slide again")
+os.remove(os.path.join(wsS, pn.AUDIO_SOURCES))
+p4 = plan_of(update=True)
+ok(not p4[2][0] and "earlier version" in p4[2][1], "audio without a record is left as it is with --update")
+logs.clear()
+before_ = sorted(os.listdir(wsS))
+code, said = run_quiet(["wsS", "synthesize", "--lang", "ja", "--ref-wav", "ref.wav", "--ref-text", "ref.txt",
+                        "--dict-file", dict_new, "--overwrite", "--dry-run"])
+ok(code == 0 and "Dry run: 4 slide(s) would be synthesized (1, 2, 3, 4); nothing was changed." in said
+   and sorted(f_ for f_ in os.listdir(wsS) if f_ != pn.LOG_FILE) == before_ and any("would be synthesized (--overwrite)" in m for m in logs),
+   "--dry-run shows what synthesize would make, and makes nothing")
+code, _ = run_quiet(["wsS", "synthesize", "--lang", "ja", "--ref-wav", "ref.wav", "--ref-text", "ref.txt",
+                     "--edited-texts-only"])
+ok(code == 2, "--edited-texts-only needs --update")
+
+# ------------------------------------------------ pauses between sentences and paragraphs
+import numpy as _np
+ok(pn.split_into_paragraph_chunks("一文目。\n二文目。\n\n三文目。四文目。")
+   == [("一文目。", False), ("二文目。", True), ("三文目。", False), ("四文目。", True)],
+   "a blank line ends a paragraph; one sentence per line does not")
+sr_ = 1000
+tone = lambda n: _np.ones(n, dtype=_np.float32)
+w1 = _np.concatenate([_np.zeros(300, dtype=_np.float32), tone(100), _np.zeros(10, dtype=_np.float32)])
+w2 = _np.concatenate([_np.zeros(5, dtype=_np.float32), tone(100), _np.zeros(400, dtype=_np.float32)])
+t1 = pn.trim_silence(w1, sr_)
+ok(len(t1) == 50 + 100 + 10, "silence at the ends is cut, keeping a short margin")
+j = pn.join_sentences([w1, w2, w1], [False, True, True], sr_, sentence_pause=0.5, paragraph_pause=1.2)
+ok(len(j) == len(pn.trim_silence(w1, sr_)) * 2 + len(pn.trim_silence(w2, sr_)) + 500 + 1200,
+   "sentences are joined with the sentence pause, paragraphs with the paragraph pause")
 
 print("ALL TESTS PASSED")
