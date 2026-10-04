@@ -891,7 +891,7 @@ def append_dictionary_entries(path, new_entries):
     with open(path, 'a', encoding='utf-8', newline='') as f:
         if needs_newline:
             f.write('\n')
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         if is_new:
             writer.writerow(DICT_HEADER)
         for term, repl in new_entries:
@@ -1752,7 +1752,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
 
     report_p = os.path.join(workspace_dir, f"verify_report{lang_suffix(lang)}.{model_label}.csv")
     with open(report_p, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["slide", "similarity", "cer", "status", "differences", "longest_difference",
                     "intended_text", "asr_text", "intended_normalized", "asr_normalized"])
         for row in sorted(results, key=lambda r: r[1]):
@@ -1773,7 +1773,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     if differences:
         diff_p = os.path.join(workspace_dir, f"verify_differences{lang_suffix(lang)}.{model_label}.csv")
         with open(diff_p, "w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
+            w = csv.writer(f, lineterminator="\n")
             w.writerow(["slide", "length", "position", "intended", "recognized", "before", "after"])
             for row in sorted(differences, key=lambda r: (-r[1], r[0], r[2])):
                 w.writerow(row)

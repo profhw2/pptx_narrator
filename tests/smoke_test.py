@@ -1046,4 +1046,11 @@ ok(pn.group_sentences(sents_, 0) == sents_ and pn.group_sentences(sents_, 10)
    == [("一文目。二文目です。", True), ("三文目。四文目。", False), ("五文目。", True)],
    "--chunk-chars joins sentences of a paragraph up to the length given, never across paragraphs")
 
+# dictionaries are written with plain line ends (no \r, which editors show as ^M)
+d_lf = os.path.join(cli_cwd, "lf_check.csv")
+pn.append_dictionary_entries(d_lf, [("CRISPR", "クリスパー")])
+pn.append_dictionary_entries(d_lf, [("PCR", "ピーシーアール")])
+ok(b"\r" not in open(d_lf, "rb").read() and len(pn.read_dictionary_file(d_lf)) == 2,
+   "dictionary lines written by scan end with a plain line break, not CRLF")
+
 print("ALL TESTS PASSED")

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `scan` wrote dictionary lines with Windows line ends (CRLF; editors show `^M`) mixed with plain ones; dictionaries and the `verify` reports are now written with plain line ends. Reading accepts either.
 - `synthesize` no longer makes existing audio again unless asked, like the other commands. `--update` makes again the slides whose reading changed since their audio was made — the text was edited, or a dictionary changed how it is read, both seen in the fingerprint of the reading now recorded in `audio_sources.json`; `--edited-texts-only` leaves out the slides changed only by a dictionary. `--overwrite` makes every selected slide again. Audio made by an earlier version, without a record, is left as it is with `--update`.
 - `synthesize --dry-run` lists the slides that would be synthesized, with the reason, and synthesizes nothing.
 - Tab completion: with shtab installed (`pip install -e ".[completion]"`), `pptx-narrator --print-completion SHELL` prints a completion script for zsh, bash, fish or PowerShell, covering the workspace, the commands, their options and the files each argument takes. `pptx-narrator --completion-setup [SHELL]` shows how to set it up for the current or a given shell; it changes no file.
