@@ -193,8 +193,10 @@ class Resp:
     text = "mock"
 pn.requests = types.SimpleNamespace(post=lambda url, json, timeout: (sent.update(json), Resp())[1], RequestException=Exception)
 pn.step_generate_audio(ws, [3], "ko", "r.wav", reftxt, "ja", "http://x/", R_de, "v4")
-ok(sent.get("text_lang") == "ko" and sent.get("prompt_lang") == "ja" and os.path.exists(os.path.join(ws, "slide_3_ko.v4.spoken.txt")),
+ok(sent.get("text_lang") == "ko" and sent.get("prompt_lang") == "ja",
    "GPT-SoVITS request languages")
+ok(not os.path.exists(os.path.join(ws, "slide_3_ko.v4.spoken.txt")),
+   "when no audio is made, no reading is written either, so the two never disagree")
 
 seen = {}
 class FakeModel:
@@ -995,8 +997,14 @@ ok([n_ for n_ in p2 if p2[n_][0]] == [3, 4], "--edited-texts-only leaves out the
 p3 = plan_of(overwrite=True)
 ok(all(p3[n_][0] for n_ in p3), "--overwrite makes every selected slide again")
 os.remove(os.path.join(wsS, pn.AUDIO_SOURCES))
+a2_ = os.path.join(wsS, pn.audio_filename(2, "ja", lbl)); s2_ = os.path.join(wsS, pn.spoken_filename(2, "ja", lbl))
+os.utime(s2_, (1_000_000, 1_000_000)); os.utime(a2_, (2_000_000, 2_000_000))   # audio made after its reading
 p4 = plan_of(update=True)
 ok(not p4[2][0] and "earlier version" in p4[2][1], "audio without a record is left as it is with --update")
+os.utime(a2_, (1_000_000, 1_000_000)); os.utime(s2_, (2_000_000, 2_000_000))   # reading newer than audio
+p5 = plan_of(update=True)
+ok(p5[2][0] and "newer than the audio" in p5[2][1],
+   "with --update, audio older than its reading (a stopped run of an earlier version) is made again, and why")
 logs.clear()
 before_ = sorted(os.listdir(wsS))
 code, said = run_quiet(["wsS", "synthesize", "--lang", "ja", "--ref-wav", "ref.wav", "--ref-text", "ref.txt",
@@ -1052,5 +1060,32 @@ pn.append_dictionary_entries(d_lf, [("CRISPR", "クリスパー")])
 pn.append_dictionary_entries(d_lf, [("PCR", "ピーシーアール")])
 ok(b"\r" not in open(d_lf, "rb").read() and len(pn.read_dictionary_file(d_lf)) == 2,
    "dictionary lines written by scan end with a plain line break, not CRLF")
+
+# the audio and its reading are put in place together, and only once the audio is complete
+class _Audio:
+    def __init__(self, fail=False): self.fail = fail
+    def export(self, path, format=None):
+        if self.fail:
+            raise RuntimeError("encoder stopped")
+        open(path, "wb").write(b"m4a")
+wsC = os.path.join(cli_cwd, "wsC"); os.makedirs(wsC)
+a_p = os.path.join(wsC, pn.audio_filename(2, "ja", "qwen3-1.7B")); s_p = os.path.join(wsC, pn.spoken_filename(2, "ja", "qwen3-1.7B"))
+open(a_p, "wb").write(b"old"); write(s_p, "古い読み")
+try:
+    pn.commit_slide_audio(wsC, 2, "ja", "qwen3-1.7B", _Audio(fail=True), "新しい読み")
+except RuntimeError:
+    pass
+ok(open(a_p, "rb").read() == b"old" and read(s_p) == "古い読み" and not any(f_.endswith(pn.PART_SUFFIX) for f_ in os.listdir(wsC)),
+   "a failed export leaves the old audio with its old reading and no partial file")
+made_ = []
+pn.commit_slide_audio(wsC, 2, "ja", "qwen3-1.7B", _Audio(), "新しい読み", on_made=made_.append)
+ok(open(a_p, "rb").read() == b"m4a" and read(s_p) == "新しい読み" and made_ == [2],
+   "a complete export replaces the audio and the reading together, and records the slide at once")
+
+# information messages of other libraries are not shown; those of this tool are
+_lib = pn.logging.getLogger("qwen_tts.core.models.configuration_qwen3_tts")
+ok(not _lib.isEnabledFor(pn.logging.INFO) and _lib.isEnabledFor(pn.logging.WARNING)
+   and pn.logger.isEnabledFor(pn.logging.INFO),
+   "INFO messages of other libraries are hidden, their warnings and this tool's messages are shown")
 
 print("ALL TESTS PASSED")

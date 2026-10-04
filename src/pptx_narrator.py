@@ -222,8 +222,11 @@ def find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=None):
         return lang, os.path.join(workspace_dir, text_filename(slide_num, lang))
     return None, None
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+# Other libraries (transformers, qwen_tts, ...) show only their warnings and errors; the
+# information messages of this tool are shown as well.
+logging.basicConfig(level=logging.WARNING, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # ------------------------------------------
 # Structured notes (translated narration + original note)
@@ -1245,6 +1248,30 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
                     f"({time.time() - t0:.1f}s{', %d dictionary term(s)' % len(glossary) if glossary else ''}).")
     return sources_found
 
+PART_SUFFIX = ".part"
+
+
+def commit_slide_audio(workspace_dir, slide_num, lang, model_label, audio, spoken_text, on_made=None):
+    """Put the new audio of a slide and the reading it was made from in place together, only
+    once the audio is complete: both are written under temporary names first and then
+    renamed, so that a run stopped half-way leaves the old audio with its old reading, never
+    a new reading beside old audio or a half-written file. on_made records the slide at once."""
+    audio_p = os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label))
+    spoken_p = os.path.join(workspace_dir, spoken_filename(slide_num, lang, model_label))
+    try:
+        audio.export(audio_p + PART_SUFFIX, format="ipod")
+        with open(spoken_p + PART_SUFFIX, "w", encoding="utf-8") as f:
+            f.write(spoken_text)
+        os.replace(audio_p + PART_SUFFIX, audio_p)
+        os.replace(spoken_p + PART_SUFFIX, spoken_p)
+    finally:
+        for p in (audio_p + PART_SUFFIX, spoken_p + PART_SUFFIX):
+            if os.path.exists(p):
+                os.remove(p)
+    if on_made:
+        on_made(slide_num)
+
+
 def step_generate_audio(
     workspace_dir,
     requested_slides,
@@ -1259,6 +1286,7 @@ def step_generate_audio(
     drc_threshold=-20.0,
     drc_ratio=3.0,
     letter_map=None,
+    on_made=None,
 ):
     logger.info("--- [Option: TTS / engine=gpt_sovits] Generating Audio ---")
     text_lang = gpt_sovits_language(lang)
@@ -1281,10 +1309,6 @@ def step_generate_audio(
             spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
-
-        with open(os.path.join(workspace_dir, spoken_filename(slide_num, lang, model_label)),
-                  "w", encoding="utf-8") as f:
-            f.write(spoken_text)
 
         payload = {
             "text": spoken_text,
@@ -1313,8 +1337,7 @@ def step_generate_audio(
             if enable_drc:
                 audio = compress_dynamic_range(audio, threshold=drc_threshold, ratio=drc_ratio)
                 audio = normalize(audio)
-            audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
-                         format="ipod")
+            commit_slide_audio(workspace_dir, slide_num, lang, model_label, audio, spoken_text, on_made)
             stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
             logger.error(f"Slide #{slide_num}: the audio from GPT-SoVITS could not be converted to m4a: {e}")
@@ -1497,6 +1520,7 @@ def step_generate_audio_qwen3(
     sentence_pause=0.5,
     paragraph_pause=0.5,
     chunk_chars=200,
+    on_made=None,
 ):
     logger.info("--- [Option: TTS / engine=qwen3] Generating Audio ---")
     language = qwen3_language(lang)
@@ -1538,10 +1562,6 @@ def step_generate_audio_qwen3(
             spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
-
-        with open(os.path.join(workspace_dir, spoken_filename(slide_num, lang, model_label)),
-                  "w", encoding="utf-8") as f:
-            f.write(spoken_text)
 
         sentences = group_sentences(split_into_paragraph_chunks(spoken_text), chunk_chars)
         chunks = [c for c, _ in sentences]
@@ -1592,8 +1612,7 @@ def step_generate_audio_qwen3(
             if enable_drc:
                 audio = compress_dynamic_range(audio, threshold=drc_threshold, ratio=drc_ratio)
                 audio = normalize(audio)
-            audio.export(os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label)),
-                         format="ipod")
+            commit_slide_audio(workspace_dir, slide_num, lang, model_label, audio, spoken_text, on_made)
             stats.add(slide_num, time.time() - started, len(audio))
         except Exception as e:
             logger.error(f"Slide #{slide_num}: Qwen3-TTS could not generate the audio: {e}")
@@ -2053,9 +2072,18 @@ def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, lette
             continue
         text = _read_text(os.path.join(workspace_dir, text_filename(n, lang))).strip()
         rec = sources.get(audio)
-        if rec is None:
-            plan.append((n, False, "audio made by an earlier version, with no record of its text; "
-                                   "--overwrite --slides makes it again"))
+        spoken_p = os.path.join(workspace_dir, spoken_filename(n, lang, model_label))
+        # Earlier versions wrote the reading before the audio was made, so a run stopped or
+        # failed half-way left a reading newer than the audio beside it.
+        reading_newer = (os.path.exists(spoken_p)
+                         and os.path.getmtime(spoken_p) > os.path.getmtime(os.path.join(workspace_dir, audio)))
+        if rec is None or (rec.get("spoken_fingerprint") is None and reading_newer):
+            if reading_newer:
+                plan.append((n, True, "the reading (.spoken.txt) is newer than the audio: an earlier run "
+                                      "stopped or failed after writing it"))
+            else:
+                plan.append((n, False, "audio made by an earlier version, with no record of its text; "
+                                       "--overwrite --slides makes it again"))
             continue
         if rec.get("text_fingerprint") != text_fingerprint(text):
             plan.append((n, True, "text edited"))
@@ -2066,7 +2094,6 @@ def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, lette
         spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map).strip()
         made_from = rec.get("spoken_fingerprint")
         if made_from is None:
-            spoken_p = os.path.join(workspace_dir, spoken_filename(n, lang, model_label))
             if not os.path.exists(spoken_p):
                 plan.append((n, False, "no record of the reading it was made from; --overwrite --slides "
                                        "makes it again"))
@@ -3680,6 +3707,12 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
             _say("No slide needs its audio made; nothing was synthesized.")
             return
         slides = to_make
+        for name in os.listdir(ws):
+            if name.endswith(PART_SUFFIX):
+                os.remove(os.path.join(ws, name))     # left by a run that was stopped
+        model_label = _model_label(effective)
+        record_one = (lambda n: record_audio_sources(ws, [n], effective["in_lang"], model_label,
+                                                     effective.get("dict_file"), started))
         if effective["engine"] == "gpt_sovits":
             config_model = MODELS_CONFIG[effective["model"]]
             base_url = effective["api_url"].rstrip("/")
@@ -3699,13 +3732,13 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                                       drc_ratio=effective["drc_ratio"], letter_map=letter_map_data,
                                       sentence_pause=effective["sentence_pause"],
                                       paragraph_pause=effective["paragraph_pause"],
-                                      chunk_chars=effective["chunk_chars"])
+                                      chunk_chars=effective["chunk_chars"], on_made=record_one)
         else:
             step_generate_audio(ws, slides, effective["in_lang"], effective["ref_wav"],
                                 effective["ref_text"], effective["ref_lang"], effective["api_url"],
                                 dictionaries, model_label, enable_drc=effective["enable_drc"],
                                 drc_threshold=effective["drc_threshold"], drc_ratio=effective["drc_ratio"],
-                                letter_map=letter_map_data)
+                                letter_map=letter_map_data, on_made=record_one)
         made = record_audio_sources(ws, slides, effective["in_lang"], model_label,
                                     effective.get("dict_file"), started)
         missing = [n for n in slides if n not in made]
