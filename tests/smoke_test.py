@@ -848,6 +848,12 @@ ok(status == 0 and all(cmd_list.count(f" {c_} ") == 1 for c_ in pn.COMMANDS),
    "--help lists every command once and is not an error")
 ok("Examples:" in top and "pptx-narrator ws map lecture.pptx --apply" in top
    and "--update --dry-run" in top, "--help ends with examples of use")
+bare, status_ = run_cli([])
+ok(status_ == 1 and "Examples:" not in bare and "'pptx-narrator --help' shows examples" in bare,
+   "without a command, the help is shown without the examples")
+sub_help, status_ = run_cli(["ws", "map", "--help"])
+ok(status_ == 0 and "Examples:" in sub_help and "map lecture.pptx --apply" in sub_help,
+   "each command's --help ends with its own examples")
 ok(run_cli(["--version"])[0].strip().endswith(pn.__version__)
    and run_cli(["--version"])[1] == 0,
    "--version prints the version instead of the help")

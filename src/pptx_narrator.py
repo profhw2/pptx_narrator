@@ -2920,6 +2920,45 @@ Examples:
 
 Options used every time (--ref-wav, --dict-file, ...) can be kept in pptx_narrator.toml."""
 
+# Shown when no command is given, so that the screen is not filled with the examples.
+SHORT_EPILOG = """WS comes first and COMMAND second; the options of a command may be given anywhere
+after COMMAND. 'pptx-narrator --help' shows examples of use, and
+'pptx-narrator WS COMMAND --help' those of one command."""
+
+COMMAND_EXAMPLES = {
+    "extract": """Examples:
+  pptx-narrator ws extract lecture.pptx
+  pptx-narrator ws extract lecture.pptx --lang ja     # only the Japanese notes
+  pptx-narrator ws extract lecture.pptx --update      # take in notes edited in the deck""",
+    "scan": """Examples:
+  pptx-narrator ws scan readings_ja.csv --lang ja     # candidate readings, to review
+  pptx-narrator ws scan readings_ja.csv --lang ja --append   # add to an existing dictionary
+  pptx-narrator ws scan terms_ja_en.csv --lang ja     # terms to translate, before translate""",
+    "translate": """Examples:
+  pptx-narrator ws translate --in-lang ja --out-lang en --dict-file terms_ja_en.csv
+  pptx-narrator ws translate --in-lang ja --out-lang en --update   # where the source changed""",
+    "synthesize": """Examples:
+  pptx-narrator ws synthesize --lang ja --dict-file readings_ja.csv \\
+      --ref-wav my_voice.wav --ref-text my_voice.txt
+  pptx-narrator ws synthesize ... --update --dry-run  # which slides would be made again, and why
+  pptx-narrator ws synthesize ... --update            # slides whose text or reading changed
+  pptx-narrator ws synthesize ... --overwrite --slides 4,7   # make these slides again""",
+    "verify": """Examples:
+  pptx-narrator ws verify --lang ja
+  pptx-narrator ws verify --lang en --max-difference 30""",
+    "pack": """Examples:
+  pptx-narrator ws pack lecture.pptx lecture_narrated.pptx
+  pptx-narrator ws pack lecture.pptx lecture_narrated.pptx --update   # write what changed
+  pptx-narrator ws pack lecture.pptx lecture_en.pptx --lang en
+  pptx-narrator ws pack lecture.pptx notes_only.pptx --data-type text""",
+    "map": """Examples:
+  pptx-narrator ws map lecture.pptx                   # shows what changed
+  pptx-narrator ws map lecture.pptx --apply           # renumbers the workspace""",
+    "history": """Examples:
+  pptx-narrator ws history
+  pptx-narrator ws history --dates""",
+}
+
 def build_parser(config_values=None):
     parser = ArgumentParser(
         prog="pptx-narrator",
@@ -3096,6 +3135,9 @@ def build_parser(config_values=None):
     for _sp in sub.choices.values():
         _sp.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
+    for name, example in COMMAND_EXAMPLES.items():
+        if name in sub.choices:
+            sub.choices[name].epilog = example
     return parser
 
 
@@ -3321,6 +3363,7 @@ def main(argv=None):
             parser.parse_args(argv)  # argparse prints it and exits 0
         if boot.workspace in COMMANDS:
             _check_command_line(boot, parser)
+        parser.epilog = SHORT_EPILOG
         parser.print_help()
         raise SystemExit(1)
     _check_command_line(boot, parser)
