@@ -1023,4 +1023,22 @@ j = pn.join_sentences([w1, w2, w1], [False, True, True], sr_, sentence_pause=0.5
 ok(len(j) == len(pn.trim_silence(w1, sr_)) * 2 + len(pn.trim_silence(w2, sr_)) + 500 + 1200,
    "sentences are joined with the sentence pause, paragraphs with the paragraph pause")
 
+# ------------------------------------------------ tab completion
+setup_, status_ = run_cli(["--completion-setup", "zsh"])
+ok(status_ == 0 and "fpath=(~/.zfunc $fpath)" in setup_ and "Nothing has been changed" in setup_,
+   "--completion-setup shows what to run and add for a shell, and changes nothing")
+setup_, status_ = run_cli(["--completion-setup", "tcsh"])
+ok(status_ == 0 and "give one of them" in setup_, "an unknown shell is answered with the shells available")
+# (the script itself needs shtab)
+try:
+    import shtab as _shtab
+except ImportError:
+    _shtab = None
+if _shtab:
+    comp, status_ = run_cli(["--print-completion", "zsh"])
+    ok(status_ == 0 and "_files -g '*.pptx'" in comp and "synthesize:" in comp,
+       "--print-completion zsh prints a completion script with the commands and file kinds")
+else:
+    print("SKIP tab completion: shtab is not installed")
+
 print("ALL TESTS PASSED")

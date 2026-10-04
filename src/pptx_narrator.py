@@ -3138,7 +3138,94 @@ def build_parser(config_values=None):
     for name, example in COMMAND_EXAMPLES.items():
         if name in sub.choices:
             sub.choices[name].epilog = example
+    _add_completion(parser, sub)
     return parser
+
+
+COMPLETION_SETUP = {
+    "zsh": """# 1. Write the completion script (run this again after updating PPTX-Narrator):
+mkdir -p ~/.zfunc
+pptx-narrator --print-completion zsh > ~/.zfunc/_pptx-narrator
+
+# 2. Add these two lines to ~/.zshrc, typically at its end.
+#    If ~/.zshrc already runs compinit (for example Oh My Zsh does so in the line
+#    'source $ZSH/oh-my-zsh.sh'), put the first line before that line instead,
+#    and leave out the second.
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+
+# 3. Open a new terminal.""",
+    "bash": """# 1. Write the completion script (run this again after updating PPTX-Narrator).
+#    It is read by the bash-completion package, which most Linux systems have;
+#    nothing needs to be added to ~/.bashrc then.
+mkdir -p ~/.local/share/bash-completion/completions
+pptx-narrator --print-completion bash > ~/.local/share/bash-completion/completions/pptx-narrator
+
+# 2. Without bash-completion, add this line to ~/.bashrc instead, typically at its end:
+# source ~/.local/share/bash-completion/completions/pptx-narrator
+
+# 3. Open a new terminal.""",
+    "fish": """# 1. Write the completion script (run this again after updating PPTX-Narrator);
+#    fish reads it from there, nothing needs to be added to config.fish:
+pptx-narrator --print-completion fish > ~/.config/fish/completions/pptx-narrator.fish
+
+# 2. Open a new terminal.""",
+    "powershell": """# 1. Add this line to your PowerShell profile (open it with: notepad $PROFILE),
+#    typically at its end; it makes the completion script anew in each session:
+pptx-narrator --print-completion powershell | Out-String | Invoke-Expression
+
+# 2. Open a new PowerShell window.""",
+}
+
+
+def completion_setup_text(shell=None):
+    """What to run, and what to add to the shell's configuration, for tab completion."""
+    if not shell or shell == "auto":
+        name = os.path.basename(os.environ.get("SHELL", "")) or ("powershell" if os.name == "nt" else "")
+        shell = {"pwsh": "powershell"}.get(name, name)
+    if shell not in COMPLETION_SETUP:
+        return ("Tab completion is available for " + ", ".join(sorted(COMPLETION_SETUP))
+                + "; give one of them: pptx-narrator --completion-setup zsh")
+    text = f"# Tab completion for pptx-narrator in {shell}. Nothing has been changed; run or add these yourself.\n"
+    try:
+        import shtab  # noqa: F401
+    except ImportError:
+        text += "\n# 0. Install shtab first:\npip install shtab\n"
+    return text + "\n" + COMPLETION_SETUP[shell]
+
+
+class _CompletionSetupAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(completion_setup_text(values))
+        parser.exit()
+
+
+def _add_completion(parser, sub):
+    """With shtab installed, --print-completion SHELL prints a tab-completion script for the
+    shell (zsh, bash, fish, powershell, tcsh): the workspace, the commands, their options,
+    and the files each argument takes (a deck, a dictionary, a recording, ...)."""
+    parser.add_argument("--completion-setup", nargs="?", const="auto", metavar="SHELL",
+                        action=_CompletionSetupAction,
+                        help="Show how to set up tab completion for SHELL (default: the current shell)")
+    try:
+        import shtab
+    except ImportError:
+        return
+
+    def files(pattern):
+        kinds = dict(shtab.FILE)
+        kinds["zsh"] = f"_files -g '{pattern}'"
+        return kinds
+
+    kinds = {"workspace": shtab.DIRECTORY, "deck": files("*.pptx"), "out_deck": files("*.pptx"),
+             "dictionary": files("*.csv"), "dict_file": files("*.csv"), "ref_wav": files("*.wav"),
+             "ref_text": files("*.txt"), "letter_map": files("*.json"), "config": files("*.toml")}
+    for p in [parser] + list(sub.choices.values()):
+        for action in p._actions:
+            if action.dest in kinds:
+                action.complete = kinds[action.dest]
+    shtab.add_argument_to(parser, "--print-completion",
+                          help="Print a tab-completion script for SHELL (see README, Tab completion)")
 
 
 def _defaults():
@@ -3358,7 +3445,8 @@ def main(argv=None):
     parser = build_parser(config)
     if not boot.command:
         # -h, --help and --version are answers in themselves.
-        asked = set(sys.argv[1:] if argv is None else argv) & {"-h", "--help", "--version"}
+        asked = set(sys.argv[1:] if argv is None else argv) & {"-h", "--help", "--version", "--print-completion",
+                                                                "--completion-setup"}
         if asked:
             parser.parse_args(argv)  # argparse prints it and exits 0
         if boot.workspace in COMMANDS:

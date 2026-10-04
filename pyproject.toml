@@ -31,7 +31,8 @@ dependencies = [
 [project.optional-dependencies]
 qwen3 = ["qwen-tts", "torch>=2.0.0", "numpy>=1.24.0", "soundfile>=0.12.1"]
 verify = ["faster-whisper>=0.10.0", "pyopenjtalk>=0.3.0"]
-all = ["pptx-narrator[qwen3,verify]"]
+completion = ["shtab>=1.7"]
+all = ["pptx-narrator[qwen3,verify,completion]"]
 
 [project.scripts]
 pptx-narrator = "pptx_narrator:main"

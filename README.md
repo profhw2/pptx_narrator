@@ -70,6 +70,32 @@ The reference recording is passed to the server by its absolute path, and the se
 
 The GPT-SoVITS API server has no authentication of its own and, by default, accepts connections only from the same computer (127.0.0.1). Using it from another computer securely, for example over an SSH tunnel, is the user's responsibility; consult your network administrator where needed.
 
+## Tab completion
+
+With [shtab](https://github.com/iterative/shtab) installed (`pip install -e ".[completion]"`, or `pip install shtab`), `pptx-narrator --print-completion SHELL` prints a completion script, so that the Tab key offers the workspace directory, the commands, their options, and the files each argument takes (`.pptx` for a deck, `.csv` for a dictionary, `.wav` and `.txt` for the reference voice). Write the script once and let the shell read it; run the same commands again after updating PPTX-Narrator. Completion works with the installed `pptx-narrator` command, not with `python src/pptx_narrator.py`.
+
+`pptx-narrator --completion-setup` shows the commands to run and the lines to add to the configuration of the current shell (or of the shell given, e.g. `--completion-setup bash`), with where they typically go; it changes nothing itself. The same steps, per shell:
+
+- zsh (macOS):
+  ```bash
+  mkdir -p ~/.zfunc
+  pptx-narrator --print-completion zsh > ~/.zfunc/_pptx-narrator
+  ```
+  and add to `~/.zshrc`, before any existing `compinit`:
+  ```bash
+  fpath=(~/.zfunc $fpath)
+  autoload -Uz compinit && compinit
+  ```
+- bash (Linux; needs the bash-completion package):
+  ```bash
+  mkdir -p ~/.local/share/bash-completion/completions
+  pptx-narrator --print-completion bash > ~/.local/share/bash-completion/completions/pptx-narrator
+  ```
+- PowerShell (Windows): add `pptx-narrator --print-completion powershell | Out-String | Invoke-Expression` to your profile (`notepad $PROFILE`).
+- fish: `pptx-narrator --print-completion fish > ~/.config/fish/completions/pptx-narrator.fish`
+
+Open a new terminal afterwards.
+
 ## Quick start
 
 To try the tool without preparing a deck, build the sample deck first; its notes contain acronyms, gene names and number-unit expressions in Japanese and English:
