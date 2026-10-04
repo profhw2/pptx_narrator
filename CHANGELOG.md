@@ -6,7 +6,8 @@
 - `synthesize --dry-run` lists the slides that would be synthesized, with the reason, and synthesizes nothing.
 - Tab completion: with shtab installed (`pip install -e ".[completion]"`), `pptx-narrator --print-completion SHELL` prints a completion script for zsh, bash, fish or PowerShell, covering the workspace, the commands, their options and the files each argument takes. `pptx-narrator --completion-setup [SHELL]` shows how to set it up for the current or a given shell; it changes no file.
 - `pptx-narrator --help` ends with examples: narration in the language of the notes, an English version, updating after edits, and renumbering after slides were inserted, deleted or reordered. The help shown when no command is given leaves them out and says where to find them. `pptx-narrator WS COMMAND --help` ends with examples of that command.
-- With Qwen3-TTS, the silence the model leaves at the start and end of each sentence is cut and the sentences are joined with a pause of fixed length, so that the pause no longer varies from one sentence to the next: `--sentence-pause` (default 0.5 s) and `--paragraph-pause` (default 0.5 s; a paragraph ends at a blank line in the text).
+- With Qwen3-TTS, the sentences of a paragraph are synthesized together, up to `--chunk-chars` characters (default 200; 0 for one sentence at a time): a sentence end that is also the end of a generation was sometimes cut short by the model, and the paragraph now sounds connected.
+- With Qwen3-TTS, a pause of fixed length now follows each chunk, so that a sentence is never run into the next however little silence the model left (the silence before a sentence's first sound is cut; its end, which often fades out softly, is kept): `--sentence-pause` (default 0.5 s) and `--paragraph-pause` (default 0.5 s; a paragraph ends at a blank line in the text).
 
 ## 1.1.0 – 2026-09-29
 

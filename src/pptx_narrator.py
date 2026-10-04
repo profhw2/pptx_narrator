@@ -1365,9 +1365,31 @@ def split_into_paragraph_chunks(text):
     return out
 
 
-def trim_silence(wav, sample_rate, margin=0.05, rel=0.01):
-    """The audio without the silence at its start and end (below rel times the peak),
-    keeping margin seconds so that a soft first or last sound is not cut."""
+def group_sentences(sentences, max_chars):
+    """Join consecutive sentences of a paragraph into chunks of at most max_chars, so that
+    fewer of them end a generation (where the model may stop before the last sound).
+    max_chars 0 keeps one sentence per chunk; a sentence longer than max_chars stays alone."""
+    if not max_chars:
+        return list(sentences)
+    out, cur, cur_len = [], [], 0
+    for text, ends_para in sentences:
+        if cur and cur_len + len(text) > max_chars:
+            out.append(("".join(cur), False))
+            cur, cur_len = [], 0
+        cur.append(text)
+        cur_len += len(text)
+        if ends_para:
+            out.append(("".join(cur), True))
+            cur, cur_len = [], 0
+    if cur:
+        out.append(("".join(cur), True))
+    return out
+
+
+def trim_leading_silence(wav, sample_rate, margin=0.05, rel=0.01):
+    """The audio without the silence before its first sound (below rel times the peak),
+    keeping margin seconds. The end is left as it is: a sentence often fades out softly
+    (the devoiced "su" of "desu" and "masu"), and cutting there clips its last sound."""
     import numpy as np
     if len(wav) == 0:
         return wav
@@ -1375,17 +1397,16 @@ def trim_silence(wav, sample_rate, margin=0.05, rel=0.01):
     loud = np.nonzero(level > rel * float(level.max()))[0]
     if len(loud) == 0:
         return wav[:0]
-    keep = int(margin * sample_rate)
-    return wav[max(0, loud[0] - keep):min(len(wav), loud[-1] + 1 + keep)]
+    return wav[max(0, loud[0] - int(margin * sample_rate)):]
 
 
 def join_sentences(wavs, ends_paragraph, sample_rate, sentence_pause=0.5, paragraph_pause=0.5):
-    """Join the audio of the sentences with a pause of fixed length between them, so that
-    the pause does not depend on how much silence the model happened to generate."""
+    """Join the audio of the sentences with a pause of fixed length after each, so that a
+    sentence is never run into the next, however little silence the model left."""
     import numpy as np
     parts = []
     for i, w in enumerate(wavs):
-        parts.append(trim_silence(w, sample_rate))
+        parts.append(trim_leading_silence(w, sample_rate))
         if i < len(wavs) - 1:
             pause = paragraph_pause if ends_paragraph[i] else sentence_pause
             parts.append(np.zeros(int(round(pause * sample_rate)), dtype=w.dtype))
@@ -1475,6 +1496,7 @@ def step_generate_audio_qwen3(
     letter_map=None,
     sentence_pause=0.5,
     paragraph_pause=0.5,
+    chunk_chars=200,
 ):
     logger.info("--- [Option: TTS / engine=qwen3] Generating Audio ---")
     language = qwen3_language(lang)
@@ -1521,7 +1543,7 @@ def step_generate_audio_qwen3(
                   "w", encoding="utf-8") as f:
             f.write(spoken_text)
 
-        sentences = split_into_paragraph_chunks(spoken_text)
+        sentences = group_sentences(split_into_paragraph_chunks(spoken_text), chunk_chars)
         chunks = [c for c, _ in sentences]
         started = time.time()
         try:
@@ -3051,6 +3073,12 @@ def build_parser(config_values=None):
          help="Compression ratio used by --enable-drc (default: 3.0)")
     _add(p, "--sentence-pause", dest="sentence_pause", type=float, default=None,
          help="Seconds of silence between sentences, Qwen3-TTS (default: 0.5)")
+    _add(p, "--chunk-chars", dest="chunk_chars", type=int, default=None,
+         help="Qwen3-TTS: synthesize up to this many characters of a paragraph at once\n"
+              "(default: 200; 0: one sentence at a time). A sentence end inside a chunk is\n"
+              "not the end of a generation, where the model may stop before the last sound,\n"
+              "and the model sets the pauses between its sentences. A sentence longer than\n"
+              "this is synthesized on its own, not split.")
     _add(p, "--paragraph-pause", dest="paragraph_pause", type=float, default=None,
          help="Seconds of silence between paragraphs (a blank line in the text), Qwen3-TTS\n(default: 0.5)")
     _add(p, "--update", dest="update", action="store_true", default=None,
@@ -3240,7 +3268,7 @@ def _defaults():
             "model": "v2ProPlus", "qwen3_model_size": "1.7B", "qwen3_device": "auto",
             "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
             "letter_map": None, "update": False, "overwrite": False, "edited_texts_only": False,
-            "dry_run": False, "sentence_pause": 0.5, "paragraph_pause": 0.5,
+            "dry_run": False, "sentence_pause": 0.5, "paragraph_pause": 0.5, "chunk_chars": 200,
         },
         "verify": {
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
@@ -3670,7 +3698,8 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                                       enable_drc=effective["enable_drc"], drc_threshold=effective["drc_threshold"],
                                       drc_ratio=effective["drc_ratio"], letter_map=letter_map_data,
                                       sentence_pause=effective["sentence_pause"],
-                                      paragraph_pause=effective["paragraph_pause"])
+                                      paragraph_pause=effective["paragraph_pause"],
+                                      chunk_chars=effective["chunk_chars"])
         else:
             step_generate_audio(ws, slides, effective["in_lang"], effective["ref_wav"],
                                 effective["ref_text"], effective["ref_lang"], effective["api_url"],

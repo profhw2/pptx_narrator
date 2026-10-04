@@ -1017,10 +1017,10 @@ sr_ = 1000
 tone = lambda n: _np.ones(n, dtype=_np.float32)
 w1 = _np.concatenate([_np.zeros(300, dtype=_np.float32), tone(100), _np.zeros(10, dtype=_np.float32)])
 w2 = _np.concatenate([_np.zeros(5, dtype=_np.float32), tone(100), _np.zeros(400, dtype=_np.float32)])
-t1 = pn.trim_silence(w1, sr_)
-ok(len(t1) == 50 + 100 + 10, "silence at the ends is cut, keeping a short margin")
+t1 = pn.trim_leading_silence(w1, sr_)
+ok(len(t1) == 50 + 100 + 10, "the silence before the first sound is cut, keeping a short margin; the end is kept")
 j = pn.join_sentences([w1, w2, w1], [False, True, True], sr_, sentence_pause=0.5, paragraph_pause=1.2)
-ok(len(j) == len(pn.trim_silence(w1, sr_)) * 2 + len(pn.trim_silence(w2, sr_)) + 500 + 1200,
+ok(len(j) == len(pn.trim_leading_silence(w1, sr_)) * 2 + len(pn.trim_leading_silence(w2, sr_)) + 500 + 1200,
    "sentences are joined with the sentence pause, paragraphs with the paragraph pause")
 
 # ------------------------------------------------ tab completion
@@ -1040,5 +1040,10 @@ if _shtab:
        "--print-completion zsh prints a completion script with the commands and file kinds")
 else:
     print("SKIP tab completion: shtab is not installed")
+
+sents_ = [("一文目。", False), ("二文目です。", True), ("三文目。", False), ("四文目。", False), ("五文目。", True)]
+ok(pn.group_sentences(sents_, 0) == sents_ and pn.group_sentences(sents_, 10)
+   == [("一文目。二文目です。", True), ("三文目。四文目。", False), ("五文目。", True)],
+   "--chunk-chars joins sentences of a paragraph up to the length given, never across paragraphs")
 
 print("ALL TESTS PASSED")
