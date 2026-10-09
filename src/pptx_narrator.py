@@ -968,12 +968,64 @@ def ja_reading_assist(text, chars=READING_ASSIST_CHARS):
     return _KANJI_DECIMAL_RE.sub("点", out)          # 三．五 -> 三点五
 
 
+_JA_WORD_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc]+")
+
+
+def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
+    """The words of Japanese text that contain one of chars, in katakana as OpenJTalk reads
+    them, except where a dictionary term (protect) stands: the dictionary gives its reading.
+    Run on the text as written, before the dictionaries replace terms by their readings,
+    which would mislead the word division (せんしょくたい中 is divided せんしょく/たい/中)."""
+    try:
+        import pyopenjtalk
+    except ImportError:
+        return ja_reading_assist(text, "")          # only warns
+    chars = set(chars or "")
+    if not chars:
+        return text
+    terms = [t for t in protect if t and _JA_WORD_RUN_RE.search(t)]
+
+    def rewrite(m):
+        run = m.group(0)
+        if not any(c in chars for c in run):
+            return run
+        guarded = [False] * len(run)
+        for term in terms:
+            start = run.find(term)
+            while start >= 0:
+                for i in range(start, start + len(term)):
+                    guarded[i] = True
+                start = run.find(term, start + 1)
+        toks = pyopenjtalk.run_frontend(run)
+        if "".join(t["string"] for t in toks) != run:   # cannot align: leave the run as written
+            return run
+        out, pos = [], 0
+        for t in toks:
+            word = t["string"]
+            span = range(pos, pos + len(word))
+            pos += len(word)
+            if (any(c in chars for c in word) and t.get("read") and t["read"] != "、"
+                    and not any(guarded[i] for i in span)):
+                out.append(t["read"])
+            else:
+                out.append(word)
+        return "".join(out)
+
+    return _JA_WORD_RUN_RE.sub(rewrite, text)
+
+
 def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=None):
-    """The text sent to the TTS engine: the dictionaries applied, then (for Japanese with
-    Qwen3-TTS) the reading assist, with the characters given (None: not applied)."""
+    """The text sent to the TTS engine. For Japanese with Qwen3-TTS (reading_assist: the
+    characters; None: not applied), the words with those characters are first written as
+    read, on the text as written; then the dictionaries are applied; then numbers become
+    kanji numerals, after the unit readings, which need the digits."""
+    japanese = reading_assist is not None and lang_suffix(lang).lstrip("_") == "ja"
+    if japanese:
+        terms = [normalize_lookalikes(unicodedata.normalize("NFC", t)) for t, r, _ in dictionaries or [] if r]
+        text = ja_assist_words(text, reading_assist, protect=terms)
     spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map)
-    if reading_assist is not None and lang_suffix(lang) == "ja":
-        spoken = ja_reading_assist(spoken, reading_assist)
+    if japanese:
+        spoken = ja_reading_assist(spoken, "")           # numbers only
     return spoken
 
 

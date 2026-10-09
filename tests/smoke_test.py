@@ -1125,6 +1125,13 @@ if _pjt:
     ok(pn.ja_reading_assist("CRISPR-Cas9でCOVID-19を調べた。") == "CRISPR-Cas9でCOVID-19を調べた。"
        and pn.ja_reading_assist("一行目。\n\n授業中。").count("\n\n") == 1,
        "reading assist leaves Latin-script words and their numbers, and paragraph breaks, as they are")
+    d_ = [("染色体", "せんしょくたい", ""), ("授業中", "じゅぎょうちゅう", "")]
+    ok(pn.spoken_text_of("染色体中の遺伝子は3割。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
+       == "せんしょくたいチュウの遺伝子は三割。"
+       and pn.spoken_text_of("授業中に5 mgを使う。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
+       == "じゅぎょうちゅうに五ミリグラムを使う。",
+       "the words are read on the text as written, before the dictionaries, whose terms take precedence; "
+       "numbers become kanji numerals after the unit readings")
     ok(pn.spoken_text_of("授業中", [], "ja", reading_assist=None) == "授業中"
        and pn.spoken_text_of("授業中", [], "en", reading_assist="中") == "授業中",
        "reading assist applies only when asked, and only to Japanese")
