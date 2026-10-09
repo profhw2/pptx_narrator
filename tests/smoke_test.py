@@ -989,7 +989,7 @@ def plan_of(**kw):
 p0 = plan_of()
 ok([n_ for n_ in p0 if p0[n_][0]] == [4], "synthesize makes only missing audio by default")
 p1 = plan_of(update=True)
-ok([n_ for n_ in p1 if p1[n_][0]] == [1, 3, 4] and p1[1][1] == "reading changed by the dictionaries"
+ok([n_ for n_ in p1 if p1[n_][0]] == [1, 3, 4] and p1[1][1] == "the reading changed (dictionaries or reading assist)"
    and p1[3][1] == "text edited" and p1[2][1] == "unchanged",
    "--update makes again the slides whose text was edited or whose reading a dictionary changed")
 p2 = plan_of(update=True, edited_only=True)
@@ -1087,5 +1087,50 @@ _lib = pn.logging.getLogger("qwen_tts.core.models.configuration_qwen3_tts")
 ok(not _lib.isEnabledFor(pn.logging.INFO) and _lib.isEnabledFor(pn.logging.WARNING)
    and pn.logger.isEnabledFor(pn.logging.INFO),
    "INFO messages of other libraries are hidden, their warnings and this tool's messages are shown")
+
+# ------------------------------------------------ --dry-run of extract, scan, translate and pack
+deckE = os.path.join(cli_cwd, "dryE.pptx"); make_deck(deckE, NOTES)
+code, _ = run_quiet(["wsD", "extract", deckE, "--lang", "en"])
+wsD = os.path.join(cli_cwd, "wsD")
+p_ = Presentation(deckE); p_.slides[0].notes_slide.notes_text_frame.text = NOTES[0] + " Edited in PowerPoint."
+deckE2 = os.path.join(cli_cwd, "dryE2.pptx"); p_.save(deckE2)
+code, said = run_quiet(["wsD", "extract", deckE2, "--lang", "en", "--update", "--dry-run"])
+ok(code == 0 and "Dry run of extract: nothing was changed" in said
+   and any(l_.strip().startswith("rewrite:") and "slide_1_en.txt" in l_ for l_ in said.splitlines())
+   and read(os.path.join(wsD, "slide_1_en.txt")) == NOTES[0],
+   "extract --dry-run reports the text it would rewrite and leaves it as it is")
+code, said = run_quiet(["wsD", "pack", deckE, "dry_out.pptx", "--data-type", "text", "--dry-run"])
+ok(code == 0 and "Dry run of pack" in said and "dry_out.pptx" in said
+   and not os.path.exists(os.path.join(cli_cwd, "dry_out.pptx")),
+   "pack --dry-run writes no deck")
+code, said = run_quiet(["wsD", "scan", "dry_dict.csv", "--lang", "en", "--dry-run"])
+ok(code == 0 and "Dry run of scan" in said and not os.path.exists(os.path.join(cli_cwd, "dry_dict.csv")),
+   "scan --dry-run writes no dictionary")
+real_mt = pn.make_translator
+code, said = run_quiet(["wsD", "translate", "--in-lang", "en", "--out-lang", "ja", "--dry-run"])
+ok(code == 0 and "create: slide_1_ja.txt" in said and not os.path.exists(os.path.join(wsD, "slide_1_ja.txt"))
+   and pn.make_translator is real_mt,
+   "translate --dry-run lists the translations it would make, without loading the model")
+
+# Japanese reading assist (needs pyopenjtalk)
+_fake_pj = sys.modules.pop("pyopenjtalk", None)      # an earlier test put a stand-in there
+try:
+    import pyopenjtalk as _pjt
+except ImportError:
+    _pjt = None
+if _pjt:
+    ok(pn.ja_reading_assist("一日中考えた結果、1週間毎に提出する。") == "イチニチジュウ考えた結果、一シュウカンゴトに提出する。"
+       and pn.ja_reading_assist("3割と3.5倍") == "三割と三点五倍",
+       "reading assist: words with a context-dependent character in katakana, numbers as kanji numerals")
+    ok(pn.ja_reading_assist("CRISPR-Cas9でCOVID-19を調べた。") == "CRISPR-Cas9でCOVID-19を調べた。"
+       and pn.ja_reading_assist("一行目。\n\n授業中。").count("\n\n") == 1,
+       "reading assist leaves Latin-script words and their numbers, and paragraph breaks, as they are")
+    ok(pn.spoken_text_of("授業中", [], "ja", reading_assist=None) == "授業中"
+       and pn.spoken_text_of("授業中", [], "en", reading_assist="中") == "授業中",
+       "reading assist applies only when asked, and only to Japanese")
+else:
+    print("SKIP reading assist: pyopenjtalk is not installed")
+if _fake_pj is not None:
+    sys.modules["pyopenjtalk"] = _fake_pj
 
 print("ALL TESTS PASSED")

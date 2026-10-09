@@ -921,6 +921,62 @@ def _replace_term(text, term, replacement):
     return text.replace(term, replacement), text.count(term)
 
 
+# ------------------------------------------
+# Japanese reading assist (Qwen3-TTS)
+# ------------------------------------------
+# Qwen3-TTS reads the characters themselves, without dividing a Japanese sentence into words,
+# so a character whose reading depends on the word it is in (中 in 授業中 and 一日中, 毎 in
+# 1週間毎) is often misread, and so is a number before a counter (3割). Before such text is
+# synthesized, OpenJTalk (pyopenjtalk) divides it into words and gives their readings: the
+# words containing such a character are written in katakana as read, and numbers as kanji
+# numerals, which the model reads correctly. Latin-script words and the numbers in them
+# (Cas9, COVID-19) are left as they are.
+READING_ASSIST_CHARS = "中内外毎間上下前後目方所分"
+_JA_RUN_RE = re.compile(
+    r"(?:[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc、。]"
+    r"|(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9]))+")
+_ASSIST_WARNED = False
+_KANJI_DECIMAL_RE = re.compile(r"(?<=[〇一二三四五六七八九十百千万億兆])[．.](?=[〇一二三四五六七八九])")
+
+
+def ja_reading_assist(text, chars=READING_ASSIST_CHARS):
+    """Rewrite Japanese text so that Qwen3-TTS reads it correctly (see above)."""
+    global _ASSIST_WARNED
+    try:
+        import pyopenjtalk
+    except ImportError:
+        if not _ASSIST_WARNED:
+            logger.warning("The Japanese reading assist needs pyopenjtalk, which is not installed "
+                           "(pip install 'pptx-narrator[qwen3]'); the text is synthesized as written.")
+            _ASSIST_WARNED = True
+        return text
+    chars = set(chars or "")
+
+    def rewrite(m):
+        out = []
+        for t in pyopenjtalk.run_frontend(m.group(0)):
+            word = t["string"]
+            if t["pos"] == "名詞" and t["pos_group1"] == "数":
+                out.append(word)                     # kanji numerals
+            elif chars and any(c in chars for c in word) and t.get("read") and t["read"] != "、":
+                out.append(t["read"])                # the whole word, as read
+            else:
+                out.append(word)
+        return "".join(out)
+
+    out = "\n".join(_JA_RUN_RE.sub(rewrite, line) for line in text.split("\n"))
+    return _KANJI_DECIMAL_RE.sub("点", out)          # 三．五 -> 三点五
+
+
+def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=None):
+    """The text sent to the TTS engine: the dictionaries applied, then (for Japanese with
+    Qwen3-TTS) the reading assist, with the characters given (None: not applied)."""
+    spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map)
+    if reading_assist is not None and lang_suffix(lang) == "ja":
+        spoken = ja_reading_assist(spoken, reading_assist)
+    return spoken
+
+
 def apply_dictionary(text, entries, lang, letter_map=None, builtin_units=True):
     """Apply the replacements (longest string first), then rewrite number + unit expressions.
 
@@ -1521,6 +1577,7 @@ def step_generate_audio_qwen3(
     paragraph_pause=0.5,
     chunk_chars=200,
     on_made=None,
+    reading_assist=READING_ASSIST_CHARS,
 ):
     logger.info("--- [Option: TTS / engine=qwen3] Generating Audio ---")
     language = qwen3_language(lang)
@@ -1559,7 +1616,8 @@ def step_generate_audio_qwen3(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
+            spoken_text = spoken_text_of(f.read().strip(), dictionaries, lang, letter_map=letter_map,
+                                         reading_assist=reading_assist)
         if not spoken_text:
             continue
 
@@ -2048,7 +2106,7 @@ def _load_audio_sources(workspace_dir):
 
 
 def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, letter_map=None,
-                   update=False, overwrite=False, edited_only=False):
+                   update=False, overwrite=False, edited_only=False, reading_assist=None):
     """Decide, per slide, whether synthesize makes its audio: [(slide, make?, reason)].
 
     Without options only missing audio is made. --overwrite makes every selected slide again.
@@ -2091,7 +2149,8 @@ def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, lette
         if edited_only:
             plan.append((n, False, "text not edited"))
             continue
-        spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map).strip()
+        spoken = spoken_text_of(text, dictionaries, lang, letter_map=letter_map,
+                                reading_assist=reading_assist).strip()
         made_from = rec.get("spoken_fingerprint")
         if made_from is None:
             if not os.path.exists(spoken_p):
@@ -2100,7 +2159,7 @@ def plan_synthesis(workspace_dir, slides, lang, model_label, dictionaries, lette
                 continue
             made_from = text_fingerprint(_read_text(spoken_p).strip())
         if made_from != text_fingerprint(spoken):
-            plan.append((n, True, "reading changed by the dictionaries"))
+            plan.append((n, True, "the reading changed (dictionaries or reading assist)"))
         else:
             plan.append((n, False, "unchanged"))
     return plan
@@ -2978,7 +3037,8 @@ COMMAND_EXAMPLES = {
     "extract": """Examples:
   pptx-narrator ws extract lecture.pptx
   pptx-narrator ws extract lecture.pptx --lang ja     # only the Japanese notes
-  pptx-narrator ws extract lecture.pptx --update      # take in notes edited in the deck""",
+  pptx-narrator ws extract lecture.pptx --update      # take in notes edited in the deck
+  pptx-narrator ws extract lecture.pptx --update --dry-run   # only show what it would take in""",
     "scan": """Examples:
   pptx-narrator ws scan readings_ja.csv --lang ja     # candidate readings, to review
   pptx-narrator ws scan readings_ja.csv --lang ja --append   # add to an existing dictionary
@@ -2998,6 +3058,7 @@ COMMAND_EXAMPLES = {
     "pack": """Examples:
   pptx-narrator ws pack lecture.pptx lecture_narrated.pptx
   pptx-narrator ws pack lecture.pptx lecture_narrated.pptx --update   # write what changed
+  pptx-narrator ws pack lecture.pptx lecture_narrated.pptx --update --dry-run   # only show it
   pptx-narrator ws pack lecture.pptx lecture_en.pptx --lang en
   pptx-narrator ws pack lecture.pptx notes_only.pptx --data-type text""",
     "map": """Examples:
@@ -3100,6 +3161,12 @@ def build_parser(config_values=None):
          help="Compression ratio used by --enable-drc (default: 3.0)")
     _add(p, "--sentence-pause", dest="sentence_pause", type=float, default=None,
          help="Seconds of silence between sentences, Qwen3-TTS (default: 0.5)")
+    _add(p, "--reading-assist", dest="reading_assist", action="store_true", default=None,
+         help="Japanese with Qwen3-TTS: write the words containing a character whose reading\n"
+              "depends on the word (--reading-assist-chars) in katakana as OpenJTalk reads them,\n"
+              "and numbers as kanji numerals (default: on; --no-reading-assist turns it off)")
+    _add(p, "--reading-assist-chars", dest="reading_assist_chars", default=None,
+         help=f"The characters for --reading-assist (default: {READING_ASSIST_CHARS})")
     _add(p, "--chunk-chars", dest="chunk_chars", type=int, default=None,
          help="Qwen3-TTS: synthesize up to this many characters of a paragraph at once\n"
               "(default: 200; 0: one sentence at a time). A sentence end inside a chunk is\n"
@@ -3193,6 +3260,9 @@ def build_parser(config_values=None):
     for name, example in COMMAND_EXAMPLES.items():
         if name in sub.choices:
             sub.choices[name].epilog = example
+    for name in ("extract", "scan", "translate", "pack"):
+        _add(sub.choices[name], "--dry-run", "--dryrun", dest="dry_run", action="store_true", default=None,
+             help="Show what would be written, and why, without changing anything")
     _add_completion(parser, sub)
     return parser
 
@@ -3285,10 +3355,10 @@ def _add_completion(parser, sub):
 
 def _defaults():
     return {
-        "extract": {"slides": None, "update": False, "overwrite": False},
-        "scan": {"scan_compounds": False, "slides": None, "dict_file": None,
+        "extract": {"slides": None, "update": False, "overwrite": False, "dry_run": False},
+        "scan": {"scan_compounds": False, "slides": None, "dict_file": None, "dry_run": False,
                  "append": False, "overwrite": False},
-        "translate": {"dict_file": None, "slides": None, "update": False, "overwrite": False,
+        "translate": {"dict_file": None, "slides": None, "update": False, "overwrite": False, "dry_run": False,
                       "translate_model": TRANSLATE_MODEL_DEFAULT, "translate_device": "auto"},
         "synthesize": {
             "engine": "qwen3", "ref_lang": "ja", "api_url": "http://127.0.0.1:9880/", "slides": None,
@@ -3296,6 +3366,7 @@ def _defaults():
             "enable_drc": False, "drc_threshold": -20.0, "drc_ratio": 3.0, "dict_file": None,
             "letter_map": None, "update": False, "overwrite": False, "edited_texts_only": False,
             "dry_run": False, "sentence_pause": 0.5, "paragraph_pause": 0.5, "chunk_chars": 200,
+            "reading_assist": True, "reading_assist_chars": READING_ASSIST_CHARS,
         },
         "verify": {
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
@@ -3304,7 +3375,7 @@ def _defaults():
         },
         "history": {"dates": False},
         "map": {"apply": False},
-        "pack": {
+        "pack": {"dry_run": False,
             "model": "v2ProPlus", "engine": "qwen3", "qwen3_model_size": "1.7B",
             "data_type": "all", "slides": None, "update": False, "overwrite": False,
             "slide_pause": 1.0, "keep_audio_icon": False, "remove_recorded": "all",
@@ -3539,7 +3610,10 @@ def main(argv=None):
     log_handler = _open_workspace_log(ws, argv)
     logger.info(f"Workspace: {ws}")
     try:
-        _run_command(command, args, effective, config, config_path, parser, ws)
+        if effective.get("dry_run") and command in DRY_RUN_COMMANDS:
+            _dry_run(command, args, effective, config, config_path, parser, ws)
+        else:
+            _run_command(command, args, effective, config, config_path, parser, ws)
     except SystemExit:
         raise
     except KeyboardInterrupt:
@@ -3692,9 +3766,11 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
             parser.error(f"no {effective['in_lang']} text was found in workspace: {ws}")
         dictionaries = load_dictionaries(effective.get("dict_file"), effective["in_lang"])
         letter_map_data = load_letter_map(effective.get("letter_map"))
+        assist = (effective.get("reading_assist_chars", READING_ASSIST_CHARS)
+                  if effective["engine"] == "qwen3" and effective.get("reading_assist", True) else None)
         plan = plan_synthesis(ws, slides, effective["in_lang"], _model_label(effective), dictionaries,
                               letter_map_data, update=effective["update"], overwrite=effective["overwrite"],
-                              edited_only=effective["edited_texts_only"])
+                              edited_only=effective["edited_texts_only"], reading_assist=assist)
         to_make = [n for n, make, _ in plan if make]
         verb = "would be synthesized" if effective["dry_run"] else "synthesized"
         for n, make, why in plan:
@@ -3732,7 +3808,8 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                                       drc_ratio=effective["drc_ratio"], letter_map=letter_map_data,
                                       sentence_pause=effective["sentence_pause"],
                                       paragraph_pause=effective["paragraph_pause"],
-                                      chunk_chars=effective["chunk_chars"], on_made=record_one)
+                                      chunk_chars=effective["chunk_chars"], on_made=record_one,
+                                      reading_assist=assist)
         else:
             step_generate_audio(ws, slides, effective["in_lang"], effective["ref_wav"],
                                 effective["ref_text"], effective["ref_lang"], effective["api_url"],
@@ -3792,9 +3869,81 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
         save_slide_map(ws, deck)
 
     written = _files_written(ws, before)
+    if _DRY_RUN["on"]:
+        _DRY_RUN["result"] = dict(written=written, out=out, dict_out=dict_out)
+        return
     _suggest_next(command, args, effective, ws, deck=deck, out=out, dict_out=dict_out)
     _report(command, ws, written, out=out, dict_out=dict_out)
     _record_run(command, ws, effective, config_path, deck=deck, out=out, dict_out=dict_out, written=written)
+
+
+# ------------------------------------------
+# --dry-run of extract, scan, translate and pack
+# ------------------------------------------
+# The command runs as usual, deciding slide by slide as it always does, but on a copy of the
+# workspace (the audio linked, not copied) and of the file it would write outside it; what
+# it would have written is then reported and the copy removed. translate does not load the
+# model: a placeholder stands in for each translation it would make.
+DRY_RUN_COMMANDS = {"extract", "scan", "translate", "pack"}
+_DRY_RUN = {"on": False, "result": None}
+
+
+class _DryTranslator:
+    def translate(self, text, source, target, glossary=None):
+        return f"(translation of {len(text)} characters, {source} -> {target})"
+
+
+def _dry_run(command, args, effective, config, config_path, parser, ws):
+    import copy
+    tmp = tempfile.mkdtemp(prefix="pptx-narrator-dry-run-")
+    try:
+        box = os.path.join(tmp, os.path.basename(os.path.normpath(ws)) or "ws")
+        os.makedirs(box)
+        for name in os.listdir(ws):
+            src = os.path.join(ws, name)
+            if name == MAP_ARCHIVE:
+                continue
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(box, name))
+            elif name.lower().endswith(".m4a"):
+                os.symlink(os.path.abspath(src), os.path.join(box, name))
+            else:
+                shutil.copy2(src, os.path.join(box, name))
+        args2 = copy.copy(args)
+        real_out = None
+        if command == "pack":
+            real_out = os.path.abspath(args.out_deck)
+            args2.out_deck = os.path.join(tmp, os.path.basename(real_out))
+            if os.path.exists(real_out):
+                shutil.copy2(real_out, args2.out_deck)
+        if command == "scan":
+            real_out = os.path.abspath(args.dictionary)
+            args2.dictionary = os.path.join(tmp, os.path.basename(real_out))
+            if os.path.exists(real_out):
+                shutil.copy2(real_out, args2.dictionary)
+        logger.info(f"Dry run of {command}: what follows is decided as usual, on a copy; nothing is changed.")
+        global make_translator
+        real_translator = make_translator
+        make_translator = lambda *a, **k: _DryTranslator()  # noqa: E731
+        _DRY_RUN.update(on=True, result=None)
+        try:
+            _run_command(command, args2, effective, config, config_path, parser, box)
+        finally:
+            make_translator = real_translator
+            _DRY_RUN["on"] = False
+        res = _DRY_RUN["result"] or {"written": {"created": [], "changed": [], "removed": []}}
+        w = res["written"]
+        _say(f"\nDry run of {command}: nothing was changed. It would write, in the workspace {ws}:")
+        for key, label in (("created", "create"), ("changed", "rewrite"), ("removed", "remove")):
+            if w[key]:
+                _say(f"  {label}: " + ", ".join(w[key]))
+        if not any(w.values()):
+            _say("  nothing")
+        if real_out:
+            _say(f"  and {'the dictionary' if command == 'scan' else 'the deck'} {real_out}")
+        _say("Run the same command without --dry-run to do it.")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 LOG_FILE = "pptx_narrator.log"
