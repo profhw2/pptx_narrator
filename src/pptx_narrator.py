@@ -2943,6 +2943,9 @@ def _config_for_command(config, command):
     return out
 
 
+_OPTION_SPELLINGS = {"--dryrun": "--dry-run"}
+
+
 def _normalize_argv(argv):
     """Rewrite each --underscore_option token to its --hyphen-option spelling.
 
@@ -2960,7 +2963,11 @@ def _normalize_argv(argv):
     for tok in argv:
         if tok.startswith("--") and tok != "--":
             name, eq, value = tok.partition("=")
-            tok = name.replace("_", "-") + eq + value
+            name = name.replace("_", "-")
+            # another spelling of an option, read as the option itself so that it does not
+            # make a shortened option ambiguous (--dry for --dry-run)
+            name = _OPTION_SPELLINGS.get(name, name)
+            tok = name + eq + value
         out.append(tok)
     return out
 
@@ -3235,7 +3242,7 @@ def build_parser(config_values=None):
               "changed through a dictionary")
     _add(p, "--overwrite", dest="overwrite", action="store_true", default=None,
          help="Make again the audio of every selected slide")
-    _add(p, "--dry-run", "--dryrun", dest="dry_run", action="store_true", default=None,
+    _add(p, "--dry-run", dest="dry_run", action="store_true", default=None,
          help="Show which slides would be synthesized, and why, without synthesizing")
     _add(p, "--slides", dest="slides", default=None, help=SLIDES_HELP)
 
@@ -3313,7 +3320,7 @@ def build_parser(config_values=None):
         if name in sub.choices:
             sub.choices[name].epilog = example
     for name in ("extract", "scan", "translate", "pack"):
-        _add(sub.choices[name], "--dry-run", "--dryrun", dest="dry_run", action="store_true", default=None,
+        _add(sub.choices[name], "--dry-run", dest="dry_run", action="store_true", default=None,
              help="Show what would be written, and why, without changing anything")
     _add_completion(parser, sub)
     return parser

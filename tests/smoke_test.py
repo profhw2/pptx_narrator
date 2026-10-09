@@ -1140,4 +1140,29 @@ else:
 if _fake_pj is not None:
     sys.modules["pyopenjtalk"] = _fake_pj
 
+# --dry can be shortened, and --dryrun is accepted
+code, said = run_quiet(["wsD", "pack", deckE, "dry_out2.pptx", "--data-type", "text", "--dry"])
+code2, said2 = run_quiet(["wsD", "pack", deckE, "dry_out2.pptx", "--data-type", "text", "--dryrun"])
+ok(code == 0 and code2 == 0 and "Dry run of pack" in said and "Dry run of pack" in said2
+   and not os.path.exists(os.path.join(cli_cwd, "dry_out2.pptx")),
+   "--dry is not ambiguous, and --dryrun means --dry-run")
+
+# every option has one name only (other spellings are read as it before parsing), so that no
+# shortened option is ambiguous because of another spelling of the same option
+def _option_names(p):
+    subs = [a for a in p._actions if isinstance(a, argparse._SubParsersAction)]
+    found = [(p.prog, a.option_strings) for a in p._actions if len([o for o in a.option_strings if o.startswith("--")]) > 1]
+    for sp in subs:
+        for q in sp.choices.values():
+            found += _option_names(q)
+    return found
+import argparse, importlib.util
+_spec = importlib.util.spec_from_file_location("screening_check", os.path.join(os.path.dirname(__file__), "..", "examples", "screening_check.py"))
+_sc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_sc)
+ok(_option_names(pn.build_parser()) == [] and _option_names(_sc.build_parser()) == [],
+   "every option of the tool and of the example scripts is registered under one name")
+_a = _sc.build_parser().parse_args(_sc.normalize_argv(["ws", "--in-lang", "en", "--model", "x", "--asr_m", "base", "--threshold", "0.9"]))
+ok(_a.in_lang == "en" and _a.model_label == "x" and _a.asr_model == "base" and _a.threshold == 0.9,
+   "screening_check: shortened and other spellings of the options are accepted")
+
 print("ALL TESTS PASSED")

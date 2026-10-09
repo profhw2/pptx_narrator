@@ -61,21 +61,41 @@ def transcripts_from_report(path):
         return {int(r["slide"]): r["asr_text"] for r in csv.DictReader(f) if r.get("asr_text")}
 
 
-def main():
+# Other spellings of the options, read as the options themselves before parsing, so that each
+# option is registered once and a shortened option (--in, --model) is never ambiguous.
+OPTION_SPELLINGS = {"--in-lang": "--lang", "--threshold": "--verify-threshold"}
+
+
+def normalize_argv(argv):
+    out = []
+    for tok in argv:
+        if tok.startswith("--") and tok != "--":
+            name, eq, value = tok.partition("=")
+            name = name.replace("_", "-")
+            tok = OPTION_SPELLINGS.get(name, name) + eq + value
+        out.append(tok)
+    return out
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("workspace", metavar="WS", help="Workspace holding the texts and the audio")
-    ap.add_argument("--lang", "--in-lang", "--in_lang", dest="in_lang", default="ja",
-                    help="Language of the narration (default: ja)")
-    ap.add_argument("--model-label", "--model_label", dest="model_label", default=None)
+    ap.add_argument("--lang", dest="in_lang", default="ja",
+                    help="Language of the narration (default: ja; --in-lang is accepted too)")
+    ap.add_argument("--model-label", dest="model_label", default=None)
     ap.add_argument("--report", default=None, help="Verification report to take the transcripts from")
-    ap.add_argument("--asr-model", "--asr_model", dest="asr_model", default="small")
-    ap.add_argument("--asr-device", "--asr_device", dest="asr_device", default="cpu")
-    ap.add_argument("--verify-threshold", "--threshold", dest="threshold", type=float, default=0.85,
-                    help="Similarity threshold, as in verify (default: 0.85)")
+    ap.add_argument("--asr-model", dest="asr_model", default="small")
+    ap.add_argument("--asr-device", dest="asr_device", default="cpu")
+    ap.add_argument("--verify-threshold", dest="threshold", type=float, default=0.85,
+                    help="Similarity threshold, as in verify (default: 0.85; --threshold is accepted too)")
     ap.add_argument("--sizes", default="3,6,12,25,50,100", help="Error sizes in characters")
     ap.add_argument("--repeats", type=int, default=20, help="Random positions per slide and size")
     ap.add_argument("--seed", type=int, default=1)
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(normalize_argv(sys.argv[1:] if argv is None else argv))
 
     lang, ws = args.in_lang.lower(), args.workspace
     suffix = pn.lang_suffix(lang)
