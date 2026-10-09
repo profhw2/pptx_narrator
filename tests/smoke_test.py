@@ -1113,6 +1113,7 @@ ok(code == 0 and "create: slide_1_ja.txt" in said and not os.path.exists(os.path
    "translate --dry-run lists the translations it would make, without loading the model")
 
 # Japanese reading assist (needs pyopenjtalk)
+_KATA_ONLY = re.compile(r"[\u30a0-\u30ff]+")
 _fake_pj = sys.modules.pop("pyopenjtalk", None)      # an earlier test put a stand-in there
 try:
     import pyopenjtalk as _pjt
@@ -1127,7 +1128,7 @@ if _pjt:
        "reading assist leaves Latin-script words and their numbers, and paragraph breaks, as they are")
     d_ = [("染色体", "せんしょくたい", ""), ("授業中", "じゅぎょうちゅう", "")]
     ok(pn.spoken_text_of("染色体中の遺伝子は3割。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
-       == "せんしょくたいチュウの遺伝子は三割。"
+       == "せんしょくたいチュウの遺伝子はサンワリ。"
        and pn.spoken_text_of("授業中に5 mgを使う。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
        == "じゅぎょうちゅうに五ミリグラムを使う。",
        "the words are read on the text as written, before the dictionaries, whose terms take precedence; "
@@ -1135,6 +1136,18 @@ if _pjt:
     ok(pn.spoken_text_of("授業中", [], "ja", reading_assist=None) == "授業中"
        and pn.spoken_text_of("授業中", [], "en", reading_assist="中") == "授業中",
        "reading assist applies only when asked, and only to Japanese")
+    ra_ = lambda x: pn.spoken_text_of(x, [], "ja", reading_assist=pn.READING_ASSIST_CHARS)
+    ok(ra_("三日目に提出") == "ミッカメに提出" and ra_("3日目") == "ミッカメ" and ra_("10分後") == "ジュップンゴ"
+       and ra_("4日間") == "ヨッカカン" and ra_("3本の") == "サンボンの" and ra_("1人で") == "ヒトリで",
+       "numbers with their counters, and a suffix with the word before it, are written as pronounced")
+    ok(ra_("学生数と遺伝子数") == "ガクセイスウとイデンシスウ" and ra_("科学的な変化率") == "カガクテキなヘンカリツ"
+       and pn.spoken_text_of("染色体数は", [("染色体", "せんしょくたい", "")], "ja",
+                             reading_assist=pn.READING_ASSIST_CHARS) == "せんしょくたいスウは",
+       "every suffix is written with the word before it, or alone after a dictionary term")
+    ok(_KATA_ONLY.fullmatch(ra_("2026年")) is not None and ra_("3.5 mLを") == "三点五ミリリットルを"
+       and ra_("1,000 mLと3.5倍") == "千ミリリットルとサンテンゴバイ",
+       "numbers before units keep their digits for the unit readings and become kanji numerals after them; "
+       "katakana already written is not read as numbers")
 else:
     print("SKIP reading assist: pyopenjtalk is not installed")
 if _fake_pj is not None:

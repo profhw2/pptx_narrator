@@ -934,7 +934,7 @@ def _replace_term(text, term, replacement):
 READING_ASSIST_CHARS = "中内外毎間上下前後目方所分"
 _JA_RUN_RE = re.compile(
     r"(?:[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc、。]"
-    r"|(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9]))+")
+    r"|(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9])(?![.,][0-9])(?!\s*[A-Za-z\u00b5\u03bc%\u00b0\u212b\u2103]))+")
 _ASSIST_WARNED = False
 _KANJI_DECIMAL_RE = re.compile(r"(?<=[〇一二三四五六七八九十百千万億兆])[．.](?=[〇一二三四五六七八九])")
 
@@ -968,27 +968,70 @@ def ja_reading_assist(text, chars=READING_ASSIST_CHARS):
     return _KANJI_DECIMAL_RE.sub("点", out)          # 三．五 -> 三点五
 
 
-_JA_WORD_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc]+")
+_KANJI_NUMERALS = set("〇一二三四五六七八九十百千万億兆")
+_DIGITS_RE = re.compile(r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?")
+
+
+_KATAKANA_RE = re.compile(r"[\u30a0-\u30ff]+")
+
+
+def _pron(t):
+    """The katakana a word is pronounced with, sound changes included (ジュッ+プン); the
+    reading where the pronunciation is not given in katakana."""
+    for value in (t.get("pron"), t.get("read")):
+        value = (value or "").replace("\u2019", "")
+        if value and _KATAKANA_RE.fullmatch(value):
+            return value
+    return t["string"]
+
+
+def _align(run, toks):
+    """[(start, end)] of each word in the run as written, numbers written in digits
+    included; None when the words cannot be placed."""
+    spans, pos, digits_done = [], 0, False
+    for t in toks:
+        word = t["string"]
+        if run.startswith(word, pos):
+            spans.append((pos, pos + len(word)))
+            pos += len(word)
+            digits_done = False
+            continue
+        start = pos
+        rest = word.lstrip("".join(_KANJI_NUMERALS) + "．")
+        m = _DIGITS_RE.match(run, pos)
+        if m and not digits_done:
+            pos = m.end()
+            digits_done = True
+        elif not m and word != rest and not digits_done:
+            return None
+        if rest:
+            if not run.startswith(rest, pos):
+                return None
+            pos += len(rest)
+            digits_done = False
+        spans.append((start, pos))
+    return spans if pos == len(run) else None
 
 
 def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
-    """The words of Japanese text that contain one of chars, in katakana as OpenJTalk reads
-    them, except where a dictionary term (protect) stands: the dictionary gives its reading.
-    Run on the text as written, before the dictionaries replace terms by their readings,
-    which would mislead the word division (せんしょくたい中 is divided せんしょく/たい/中)."""
+    """Rewrite Japanese text as written, before the dictionaries, so that Qwen3-TTS reads it:
+    a number with the counters after it, and a word that is itself a number with a counter
+    (三日, 一人, 四日間), in katakana as pronounced (ミッカ, ジュップン, サンボン); a suffix,
+    whose reading depends on the word before it, in katakana together with that word
+    (授業中 → ジュギョウチュウ, 学生数 → ガクセイスウ, 三日目 → ミッカメ); and a word
+    containing one of chars in katakana as read (一日中 → イチニチジュウ). Where a dictionary term
+    (protect) stands, the words are left for the dictionary (染色体中 → 染色体チュウ).
+    The dictionaries would mislead the word division if applied first (せんしょくたい中 is
+    divided せんしょく/たい/中)."""
     try:
         import pyopenjtalk
     except ImportError:
         return ja_reading_assist(text, "")          # only warns
     chars = set(chars or "")
-    if not chars:
-        return text
     terms = [t for t in protect if t and _JA_WORD_RUN_RE.search(t)]
 
     def rewrite(m):
         run = m.group(0)
-        if not any(c in chars for c in run):
-            return run
         guarded = [False] * len(run)
         for term in terms:
             start = run.find(term)
@@ -997,21 +1040,66 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
                     guarded[i] = True
                 start = run.find(term, start + 1)
         toks = pyopenjtalk.run_frontend(run)
-        if "".join(t["string"] for t in toks) != run:   # cannot align: leave the run as written
-            return run
-        out, pos = [], 0
-        for t in toks:
+        spans = _align(run, toks)
+        if spans is None:
+            return run                                  # cannot place the words: as written
+        out = []                                        # [text, converted?, protected?, token]
+        i = 0
+        while i < len(toks):
+            t, (a, b) = toks[i], spans[i]
+            prot = any(guarded[a:b])
+            is_num = t["pos"] == "名詞" and t["pos_group1"] == "数"
+            numeric_word = (not is_num and t["pos_group1"] == "副詞可能"
+                            and any(c in _KANJI_NUMERALS for c in t["string"]))
+            if (is_num or numeric_word) and not prot:
+                # the number, its decimal point, and the counters after it, as pronounced
+                j, said = i, ""
+                while j < len(toks) and (j == i or (toks[j]["pos"] == "名詞" and toks[j]["pos_group1"] in ("数", "接尾"))):
+                    if any(guarded[spans[j][0]:spans[j][1]]):
+                        break
+                    said += _pron(toks[j])
+                    j += 1
+                out.append([said, True, False, t])
+                i = j
+                continue
             word = t["string"]
-            span = range(pos, pos + len(word))
-            pos += len(word)
-            if (any(c in chars for c in word) and t.get("read") and t["read"] != "、"
-                    and not any(guarded[i] for i in span)):
-                out.append(t["read"])
-            else:
-                out.append(word)
-        return "".join(out)
+            suffix = t["pos"] == "名詞" and t["pos_group1"] == "接尾"
+            if (not prot and (suffix or (chars and any(c in chars for c in word)))
+                    and t.get("read") and _KATAKANA_RE.fullmatch(t["read"])):
+                said = t["read"]
+                prev = out[-1] if out else None
+                if (suffix and prev and not prev[1] and not prev[2]
+                        and prev[3]["pos"] == "名詞" and not set(prev[0]) & set("、。")):
+                    prev[0], prev[1] = prev[3]["read"] + said, True    # with the word before
+                else:
+                    out.append([said, True, False, t])
+                i += 1
+                continue
+            out.append([run[a:b], False, prot, t])
+            i += 1
+        return "".join(p[0] for p in out)
 
-    return _JA_WORD_RUN_RE.sub(rewrite, text)
+    return "\n".join(_JA_RUN_RE.sub(rewrite, line) for line in text.split("\n"))
+
+
+_JA_WORD_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc]+")
+
+
+_LONE_DIGITS_RE = re.compile(r"(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9])")
+
+
+def ja_numbers_kanji(text):
+    """Numbers written in digits, as kanji numerals (5 → 五, 3.5 → 三点五); only the digits
+    are touched, so that katakana already written (ニセン...) is not read as numbers."""
+    try:
+        import pyopenjtalk
+    except ImportError:
+        return ja_reading_assist(text, "")          # only warns
+
+    def kanji(m):
+        out = "".join(t["string"] for t in pyopenjtalk.run_frontend(m.group(0)))
+        return _KANJI_DECIMAL_RE.sub("点", out)
+    return _LONE_DIGITS_RE.sub(kanji, text)
 
 
 def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=None):
@@ -1025,7 +1113,7 @@ def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=Non
         text = ja_assist_words(text, reading_assist, protect=terms)
     spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map)
     if japanese:
-        spoken = ja_reading_assist(spoken, "")           # numbers only
+        spoken = ja_numbers_kanji(spoken)                # the digits left (unit readings)
     return spoken
 
 
