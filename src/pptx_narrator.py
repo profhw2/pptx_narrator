@@ -655,7 +655,8 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
         r'|\b(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b'
     )
 
-    existing_terms = {t.lower() for t, _, _ in entries or []}
+    # covered: the terms of the dictionary as they match (see _case_variants)
+    existing_terms = {v for t, _, _ in entries or [] for v in _case_variants(t)}
     candidates = {}  # term -> is narration text (reading candidate)
     for p, file_lang in texts:
         with open(p, 'r', encoding='utf-8') as f:
@@ -674,7 +675,7 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
 
         for term in generic_found:
             term_lower = term.lower()
-            if _is_single_letter(term) or term_lower in existing_terms or term_lower in stop_words:
+            if _is_single_letter(term) or term in existing_terms or term_lower in stop_words:
                 continue
             if re.fullmatch(rf'[{latin}]+', term):
                 acronym_like = term.isupper() or bool(re.search(r'[a-z][A-Z]', term))
@@ -685,14 +686,13 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
                 if not english_filter and not acronym_like:
                     continue
             candidates[term] = narration_text
-            existing_terms.add(term_lower)
+            existing_terms.update(_case_variants(term))
 
         for term in bypass_found:
-            term_lower = term.lower()
-            if _is_single_letter(term) or term_lower in existing_terms:
+            if _is_single_letter(term) or term in existing_terms:
                 continue
             candidates[term] = narration_text
-            existing_terms.add(term_lower)
+            existing_terms.update(_case_variants(term))
 
     if not candidates:
         logger.info("No new terms found.")
@@ -914,6 +914,18 @@ def normalize_lookalikes(text):
     return text.translate(_LOOKALIKES)
 
 
+def _case_variants(term):
+    """The spellings a dictionary term matches: itself, and with its first letter in the other
+    case when its first word is an ordinary word (three letters or more, lower case after the
+    first: Prophase I also matches prophase I, transcription also Transcription at the start
+    of a sentence). Acronyms and other mixed-case terms (DNA, mRNA) and short ones, whose case
+    can carry meaning (Mg, mg), match only as written."""
+    m = re.match(r"[A-Za-z]+", term)
+    if m and len(m.group()) >= 3 and m.group()[1:].islower():
+        return [term, term[0].swapcase() + term[1:]]
+    return [term]
+
+
 def _replace_term(text, term, replacement):
     if re.match(r'^[a-zA-Z0-9_ \-]+$', term):
         pattern = rf'(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])'
@@ -1130,7 +1142,13 @@ def apply_dictionary(text, entries, lang, letter_map=None, builtin_units=True):
         repl = unicodedata.normalize('NFC', repl)
         if repl:
             (units if typ == "unit" else terms)[term] = repl
-    for term, repl in sorted(terms.items(), key=lambda x: len(x[0]), reverse=True):
+    spelled = dict(terms)
+    for term, repl in terms.items():
+        for variant in _case_variants(term)[1:]:
+            # the replacement follows the case of the text where it begins with the same letter
+            same_start = repl[:1].isalpha() and repl[:1].lower() == term[:1].lower()
+            spelled.setdefault(variant, repl[0].swapcase() + repl[1:] if same_start else repl)
+    for term, repl in sorted(spelled.items(), key=lambda x: len(x[0]), reverse=True):
         text, _ = _replace_term(text, term, repl)
     if builtin_units:
         return normalize_units(text, units, letter_map=letter_map, lang=lang)

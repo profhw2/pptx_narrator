@@ -1178,4 +1178,15 @@ _a = _sc.build_parser().parse_args(_sc.normalize_argv(["ws", "--in-lang", "en", 
 ok(_a.in_lang == "en" and _a.model_label == "x" and _a.asr_model == "base" and _a.threshold == 0.9,
    "screening_check: shortened and other spellings of the options are accepted")
 
+# a dictionary term that is an ordinary word matches with its first letter in either case;
+# acronyms, mixed-case and short terms match only as written
+d_case = [("Prophase I", "Prophase 1", ""), ("transcription", "トランスクリプション", ""),
+          ("Mg", "マグネシウム", ""), ("DNA", "ディーエヌエー", "")]
+ok(pn.apply_dictionary("In prophase I, transcription.", d_case, "en") == "In prophase 1, トランスクリプション."
+   and pn.apply_dictionary("Transcription of DNA, not dna.", d_case, "en") == "トランスクリプション of ディーエヌエー, not dna."
+   and pn.apply_dictionary("5 mg of Mg", d_case, "en").endswith("of マグネシウム") and "mg" in pn.apply_dictionary("5 mg of Mg", d_case, "en"),
+   "dictionary terms: the first letter of an ordinary word in either case; acronyms and short terms as written")
+ok(pn._case_variants("Prophase I") == ["Prophase I", "prophase I"] and pn._case_variants("mRNA") == ["mRNA"]
+   and pn._case_variants("Mg") == ["Mg"], "scan counts a term as in the dictionary by the same rule")
+
 print("ALL TESTS PASSED")
