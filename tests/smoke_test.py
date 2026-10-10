@@ -1194,4 +1194,27 @@ ok(pn.apply_dictionary("In prophase I, transcription.", d_case, "en") == "In pro
 ok(pn._case_variants("Prophase I") == ["Prophase I", "prophase I"] and pn._case_variants("mRNA") == ["mRNA"]
    and pn._case_variants("Mg") == ["Mg"], "scan counts a term as in the dictionary by the same rule")
 
+# verify (Japanese): differences put down to the recognizer are told apart and not counted
+def _units(spec):
+    """[(word, kind, kana)] -> kana units as kana_units makes them"""
+    return [(c, kind, word, ti) for ti, (word, kind, kana) in enumerate(spec) for c in kana]
+_a = _units([("前期", "kanji", "ゼンキ"), ("prophase", "latin", "ピーアールオーピーエイチエーエスイー"),
+             ("の", "kana", "ノ"), ("精製", "kanji", "セーセー"), ("と", "kana", "ト"),
+             ("23対", "kanji", "ニジューサンツイ"), ("です", "kana", "デス")])
+_b = _units([("前期", "kanji", "ゼンキ"), ("プロフェーズ", "kana", "プロフェーズ"),
+             ("の", "kana", "ノ"), ("聖", "kanji", "ヒジリ"), ("正", "kanji", "タダシ"), ("と", "kana", "ト"),
+             ("二十", "kanji", "ニジュー"), ("三つ", "kanji", "ミッツ"), ("い", "kana", "イ"), ("です", "kana", "デス")])
+_txt = "前期prophaseの精製と23対です"
+_cl = pn.classify_differences(_a, _b, _txt)
+_kinds = [k for k, *_ in _cl]
+ok(pn.DIFF_LATIN in _kinds and pn.DIFF_KANJI in _kinds and pn.DIFF_NARRATION in _kinds,
+   "verify tells a Latin-script word, other kanji in the transcript, and the narration's own differences apart")
+_A = "".join(u[0] for u in _a); _B = "".join(u[0] for u in _b)
+_an, _bn = pn.narration_sequences(_A, _B, _cl)
+_n, _longest = pn.difference_runs(_an, _bn)
+_narr = [(_A[i1:i2], _B[j1:j2]) for k, i1, i2, j1, j2 in _cl if k == pn.DIFF_NARRATION]
+ok(_narr and all("サン" in x or "ミッ" in y for x, y in _narr) and _n == len(_narr)
+   and pn.kana_sequence_scores(_an, _bn)[0] > pn.kana_sequence_scores(_A, _B)[0],
+   "only the narration's differences count in the scores; a misread number stays the narration's")
+
 print("ALL TESTS PASSED")

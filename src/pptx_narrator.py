@@ -1885,6 +1885,102 @@ def kana_scores(text_intended, text_asr):
     similarity, cer = kana_sequence_scores(kana_a, kana_b)
     return similarity, cer, kana_a, kana_b
 
+# ------------------------------------------
+# Telling narration errors from recognition artifacts (Japanese)
+# ------------------------------------------
+# Both texts are turned into katakana word by word, each character remembering the word it
+# came from. A difference is then put down to the recognizer, not to the narration, when
+#   - it falls on a Latin-script word of the narration: such a word becomes letter names
+#     (prophase -> ピーアールオー...), while the recognizer writes what it heard (プロフェーズ);
+#   - the recognizer wrote a word of the narration (in kanji or kana) with kanji that are not in
+#     the narration at all (聖正 for 精製, 線粒体 for せんしょくたい), which are then read in their
+#     own way; numbers are excepted, since a misread number is the narration's error.
+# Only the other differences count in the scores and the flag.
+DIFF_NARRATION, DIFF_LATIN, DIFF_KANJI = "narration", "Latin-script word", "transcript kanji"
+_LATIN_CHAR_RE = re.compile(r"[A-Za-z\uff21-\uff3a\uff41-\uff5a]")
+_KANJI_CHAR_RE = re.compile(r"[\u3400-\u9fff\u3005]")
+
+
+def kana_units(text):
+    """[(katakana character, kind of the word it came from, the word, its index)], kind being
+    'latin', 'kanji' or 'kana'; punctuation and spaces are left out."""
+    import pyopenjtalk
+    units = []
+    for ti, t in enumerate(pyopenjtalk.run_frontend(text)):
+        word = t["string"]
+        if t["pos"] == "記号" and not _LATIN_CHAR_RE.search(word):
+            continue
+        said = _pron(t)
+        kind = ("latin" if _LATIN_CHAR_RE.search(word)
+                else "kanji" if _KANJI_CHAR_RE.search(word) else "kana")
+        units.extend((c, kind, word, ti) for c in said if not _KANA_PUNCT_RE.match(c))
+    return units
+
+
+def _foreign_kanji_share(units, intended_text):
+    """The share of the characters that come from kanji the narration does not have: the
+    kanji words of the transcript that follow one another are taken together (粒体 read as
+    粒 + 体, 指認 as 指 + 認), and such a compound counts when it is not in the narration and
+    is not a number."""
+    if not units:
+        return 0.0
+    foreign, run, words = 0, [], []
+
+    def close():
+        nonlocal foreign
+        compound = "".join(words)
+        if run and compound not in intended_text and not set(compound) <= _KANJI_NUMERALS | set("つ"):
+            foreign += len(run)
+        run.clear()
+        words.clear()
+
+    previous = None
+    for unit in units:
+        if unit[1] == "kanji":
+            if unit[3] != previous:
+                words.append(unit[2])
+            run.append(unit)
+        else:
+            close()
+        previous = unit[3]
+    close()
+    return foreign / len(units)
+
+
+def classify_differences(a_units, b_units, intended_text):
+    """[(kind, i1, i2, j1, j2)] for each place where the two kana sequences differ."""
+    a = "".join(u[0] for u in a_units)
+    b = "".join(u[0] for u in b_units)
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        a_kinds = {u[1] for u in a_units[i1:i2]}
+        near = {a_units[k][1] for k in (i1 - 1, i1) if 0 <= k < len(a_units)} if i1 == i2 else set()
+        if "latin" in a_kinds or "latin" in near:
+            kind = DIFF_LATIN
+        elif i1 < i2 and _foreign_kanji_share(b_units[j1:j2], intended_text) >= 0.5:
+            # mostly kanji the narration does not have, not a number (a misread number stays
+            # the narration's)
+            kind = DIFF_KANJI
+        else:
+            kind = DIFF_NARRATION
+        out.append((kind, i1, i2, j1, j2))
+    return out
+
+
+def narration_sequences(a, b, classified):
+    """The two sequences with the differences put down to the recognizer made equal, so that
+    the scores count the narration's differences only."""
+    a, b = list(a), list(b)
+    for kind, i1, i2, j1, j2 in reversed(classified):
+        if kind != DIFF_NARRATION:
+            same = ["\u25c7"] * (i2 - i1)
+            a[i1:i2] = same
+            b[j1:j2] = same
+    return "".join(a), "".join(b)
+
+
 _NON_WORD_RE = re.compile(r"[\W_]+")
 
 def normalize_for_comparison(text):
@@ -1938,7 +2034,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     logger.info(f"Loading Whisper model ({asr_model_size}, device={asr_device})...")
     asr_model = WhisperModel(asr_model_size, device=asr_device, compute_type="int8")
 
-    results, differences = [], []
+    results, differences, asr_differences = [], [], []
     for slide_num in requested_slides:
         audio_p = os.path.join(workspace_dir, audio_filename(slide_num, lang, model_label))
         spoken_p = os.path.join(workspace_dir, spoken_filename(slide_num, lang, model_label))
@@ -1959,28 +2055,44 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
 
         try:
             if is_ja:
-                score, cer, norm_intended, norm_asr = kana_scores(intended_text, asr_text)
+                a_units, b_units = kana_units(intended_text), kana_units(asr_text)
+                norm_intended = "".join(u[0] for u in a_units)
+                norm_asr = "".join(u[0] for u in b_units)
+                classified = classify_differences(a_units, b_units, intended_text)
+                a_n, b_n = narration_sequences(norm_intended, norm_asr, classified)
+                score, cer = kana_sequence_scores(a_n, b_n)
             else:
                 score, cer, norm_intended, norm_asr = text_scores(intended_text, asr_text)
+                classified = [(DIFF_NARRATION, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in
+                              difflib.SequenceMatcher(None, norm_intended, norm_asr, autojunk=False).get_opcodes()
+                              if tag != "equal"]
+                a_n, b_n = norm_intended, norm_asr
         except Exception as e:
             logger.error(f"Slide {slide_num}: comparison failed: {e}")
             continue
 
-        n_runs, worst_run = difference_runs(norm_intended, norm_asr)
-        for pos, said, heard, before, after in difference_list(norm_intended, norm_asr, minimum=min_difference):
-            differences.append((slide_num, max(len(said), len(heard)), pos, said, heard, before, after))
-
-        # Latin-script words left in Japanese narration cannot be compared reliably as kana
-        has_latin = is_ja and bool(re.search(r'[A-Za-z]{2,}', intended_text))
+        n_runs, worst_run = difference_runs(a_n, b_n)
+        n_asr = 0
+        for kind, i1, i2, j1, j2 in classified:
+            said, heard = norm_intended[i1:i2], norm_asr[j1:j2]
+            row = (slide_num, max(len(said), len(heard)), i1, said, heard,
+                   norm_intended[max(0, i1 - 8):i1], norm_intended[i2:i2 + 8])
+            if kind == DIFF_NARRATION:
+                if row[1] >= min_difference:
+                    differences.append(row)
+            else:
+                n_asr += 1
+                asr_differences.append(row + (kind,))
         long_difference = max_difference is not None and worst_run > max_difference
         failed = (score < threshold or long_difference
                   or (cer_threshold is not None and cer > cer_threshold))
-        status = "LATIN" if has_latin else ("FLAGGED" if failed else "OK")
+        status = "FLAGGED" if failed else "OK"
 
-        results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run,
+        results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run, n_asr,
                         intended_text, asr_text, norm_intended, norm_asr))
         logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
-                    f"{n_runs} difference(s), longest {worst_run} characters [{status}]")
+                    f"{n_runs} difference(s), longest {worst_run} characters"
+                    + (f", {n_asr} put down to the recognizer" if n_asr else "") + f" [{status}]")
 
     if not results:
         # The file names carry the engine and model, so looking for the wrong label is
@@ -1999,20 +2111,18 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
     with open(report_p, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["slide", "similarity", "cer", "status", "differences", "longest_difference",
-                    "intended_text", "asr_text", "intended_normalized", "asr_normalized"])
+                    "recognizer_differences", "intended_text", "asr_text", "intended_normalized",
+                    "asr_normalized"])
         for row in sorted(results, key=lambda r: r[1]):
             w.writerow(row)
 
     n_flagged = sum(1 for r in results if r[3] == "FLAGGED")
-    n_latin = sum(1 for r in results if r[3] == "LATIN")
     criterion = f"similarity < {threshold}"
     if max_difference is not None:
         criterion += f", a difference longer than {max_difference} characters"
     if cer_threshold is not None:
         criterion += f" or CER > {cer_threshold}"
     logger.info(f"Done: {n_flagged}/{len(results)} slide(s) flagged for review ({criterion}).")
-    if n_latin:
-        logger.info(f"{n_latin} slide(s) contain un-converted Latin-script words and need a listen.")
     logger.info(f"Report saved to: {os.path.basename(report_p)} (sorted worst-first)")
 
     if differences:
@@ -2025,6 +2135,15 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         logger.info(f"{len(differences)} difference(s) of at least {min_difference} characters listed in: "
                     f"{os.path.basename(diff_p)} "
                     "(longest first)")
+    if asr_differences:
+        asr_p = os.path.join(workspace_dir, f"verify_asr_differences{lang_suffix(lang)}.{model_label}.csv")
+        with open(asr_p, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(["slide", "length", "position", "intended", "recognized", "before", "after", "kind"])
+            for row in sorted(asr_differences, key=lambda r: (r[0], r[2])):
+                w.writerow(row)
+        logger.info(f"{len(asr_differences)} difference(s) probably made by the recognizer (Latin-script "
+                    f"words, other kanji in the transcript), not counted, listed in: {os.path.basename(asr_p)}")
 
 _P14_MEDIA_RE = re.compile(r'<(p14:media)\b([^>]*?)(/?)>(?:(.*?)</p14:media>)?', re.DOTALL)
 _P14_PLAYBACK_CHILD_RE = re.compile(
@@ -2900,6 +3019,8 @@ def _file_role(name):
         return "verification report"
     if name.startswith("verify_differences"):
         return "verification differences"
+    if name.startswith("verify_asr_differences"):
+        return "verification differences put down to the recognizer"
     if name == TRANSLATION_MANIFEST:
         return "translation manifest"
     if _TEXT_FILE_RE.match(name):
@@ -4385,7 +4506,7 @@ def apply_slide_map(workspace_dir, deck_path, plan):
             logger.removeHandler(h)
             h.close()
     for name in os.listdir(workspace_dir):
-        if name == LOG_FILE or name.startswith(("verify_report", "verify_differences")):
+        if name == LOG_FILE or name.startswith(("verify_report", "verify_differences", "verify_asr_differences")):
             shutil.move(os.path.join(workspace_dir, name), os.path.join(archive, name))
     _reopen_workspace_log(workspace_dir)
     # Files of slides no longer in the deck.
