@@ -1046,18 +1046,32 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
     except ImportError:
         return ja_reading_assist(text, "")          # only warns
     chars = set(chars or "")
-    terms = [t for t in protect if t and _JA_WORD_RUN_RE.search(t)]
+    terms = [v for t in protect if t for v in _case_variants(t)]
 
-    def rewrite(m):
-        run = m.group(0)
-        guarded = [False] * len(run)
+    def rewrite_line(line):
+        # dictionary terms are found in the whole line, so that one spanning Latin script and
+        # Japanese (Moodle上) is left to the dictionary too
+        guarded_line = [False] * len(line)
         for term in terms:
-            start = run.find(term)
+            start = line.find(term)
             while start >= 0:
                 for i in range(start, start + len(term)):
-                    guarded[i] = True
-                start = run.find(term, start + 1)
-        toks = pyopenjtalk.run_frontend(run)
+                    guarded_line[i] = True
+                start = line.find(term, start + 1)
+        return _JA_RUN_RE.sub(lambda m: rewrite(m, line, guarded_line), line)
+
+    def rewrite(m, line, guarded_line):
+        run = m.group(0)
+        guarded = guarded_line[m.start():m.end()]
+        # Japanese right after a Latin-script word (Moodle上) is divided as it would be after a
+        # noun, which the word is: alone, 上 would be read うえ, not the suffix じょう
+        before = line[:m.start()].rstrip()
+        after_latin = bool(before) and bool(re.match(r"[A-Za-z0-9)]", before[-1]))
+        toks = pyopenjtalk.run_frontend(_AFTER_WORD + run) if after_latin else None
+        if toks and toks[0]["string"] == _AFTER_WORD:
+            toks = toks[1:]
+        else:
+            toks = pyopenjtalk.run_frontend(run)
         spans = _align(run, toks)
         if spans is None:
             return run                                  # cannot place the words: as written
@@ -1119,9 +1133,10 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
             i += 1
         return "".join(p[0] for p in out)
 
-    return "\n".join(_JA_RUN_RE.sub(rewrite, line) for line in text.split("\n"))
+    return "\n".join(rewrite_line(line) for line in text.split("\n"))
 
 
+_AFTER_WORD = "エックス"        # a noun put before Japanese that follows a Latin-script word
 _JA_WORD_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc]+")
 
 
@@ -1989,6 +2004,24 @@ def _foreign_kanji_share(units, intended_text):
 
 
 DIFF_DIGITS = "transcript digits"
+DIFF_SAME_KANJI = "transcript kanji as in the note"
+
+
+def _kanji_compound(units, j1, j2):
+    """The kanji words of the transcript around units[j1:j2], joined: the run of kanji words
+    the difference falls in (動原体 read 動 + 原 + 体 when OpenJTalk splits it)."""
+    if not any(u[1] == "kanji" for u in units[j1:j2]):
+        return ""
+    lo, hi = j1, j2
+    while lo > 0 and units[lo - 1][1] == "kanji":
+        lo -= 1
+    while hi < len(units) and units[hi][1] == "kanji":
+        hi += 1
+    words = []
+    for u in units[lo:hi]:
+        if u[1] == "kanji" and (not words or words[-1][1] != u[3]):
+            words.append((u[2], u[3]))
+    return [w for w, _ in words]
 _DIGIT_RUN_RE = re.compile(r"[0-9]+")
 
 
@@ -2031,9 +2064,19 @@ def classify_differences(a_units, b_units, intended_text, reference_text=""):
             kind = DIFF_LATIN
         elif _digits_heard_right(b_units[j1:j2], reference):
             kind = DIFF_DIGITS
-        elif i1 < i2 and _foreign_kanji_share(b_units[j1:j2], intended_text) >= 0.5:
-            # mostly kanji the narration does not have, not a number
-            kind = DIFF_KANJI
+        elif (compound := "".join(words := _kanji_compound(b_units, j1, j2))) and \
+                not set(compound) <= _KANJI_NUMERALS | set("つ"):
+            if compound in reference:
+                # the recognizer wrote the note's own kanji word: it heard it right, and only the
+                # reading OpenJTalk gives the word in the transcript differs (原 read ハラ in 動原体)
+                kind = DIFF_SAME_KANJI
+            elif any(len(w) == 1 and w not in _KANJI_NUMERALS for w in words):
+                # kanji OpenJTalk does not know as a word and reads one by one (聖正, 線食体): the
+                # recognizer put together kanji for the sound it heard
+                kind = DIFF_KANJI
+            else:
+                # a real word not in the note (二種類 for 父由来): the narration said something else
+                kind = DIFF_NARRATION
         else:
             kind = DIFF_NARRATION
         for tag, a1, a2, b1, b2 in g:

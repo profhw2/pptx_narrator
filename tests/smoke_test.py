@@ -1147,6 +1147,12 @@ if _pjt:
     ok(ra_("４つの") == "ヨッツの" and ra_("4つの") == "ヨッツの" and ra_("四つの") == "ヨッツの"
        and ra_("２つ目") == "フタツメ" and ra_("１０分後") == "ジュップンゴ" and ra_("一般的な統一") == "イッパンテキな統一",
        "full-width digits are numbers too, and a number written with つ is read as pronounced")
+    ok(pn.spoken_text_of("課題はMoodle上で提出します。", [("Moodle上", "モードゥルじょう", ""), ("Moodle", "ムードル", "")],
+                         "ja", reading_assist=pn.READING_ASSIST_CHARS) == "課題はモードゥルじょうで提出します。"
+       and pn.spoken_text_of("課題はMoodle上で提出します。", [("Moodle", "ムードル", "")],
+                             "ja", reading_assist=pn.READING_ASSIST_CHARS) == "課題はムードルジョウで提出します。",
+       "a dictionary term spanning Latin script and Japanese is left to the dictionary; Japanese after a "
+       "Latin-script word is read as after a noun (上 as the suffix じょう)")
     ok(pn.spoken_text_of("ＤＮＡの", [("DNA", "ディーエヌエー", "")], "ja", reading_assist=None) == "ディーエヌエーの",
        "a dictionary term matches text written in full-width letters")
     ok(ra_("2026年") == "二千二十六年" and ra_("七割の") == "七割の" and ra_("3.5 mLを") == "三点五ミリリットルを"
