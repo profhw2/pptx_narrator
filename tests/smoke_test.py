@@ -1144,6 +1144,11 @@ if _pjt:
        and pn.spoken_text_of("染色体数は", [("染色体", "せんしょくたい", "")], "ja",
                              reading_assist=pn.READING_ASSIST_CHARS) == "せんしょくたいスウは",
        "every suffix is written with the word before it, or alone after a dictionary term")
+    ok(ra_("４つの") == "ヨッツの" and ra_("4つの") == "ヨッツの" and ra_("四つの") == "ヨッツの"
+       and ra_("２つ目") == "フタツメ" and ra_("１０分後") == "ジュップンゴ" and ra_("一般的な統一") == "イッパンテキな統一",
+       "full-width digits are numbers too, and a number written with つ is read as pronounced")
+    ok(pn.spoken_text_of("ＤＮＡの", [("DNA", "ディーエヌエー", "")], "ja", reading_assist=None) == "ディーエヌエーの",
+       "a dictionary term matches text written in full-width letters")
     ok(_KATA_ONLY.fullmatch(ra_("2026年")) is not None and ra_("3.5 mLを") == "三点五ミリリットルを"
        and ra_("1,000 mLと3.5倍") == "千ミリリットルとサンテンゴバイ",
        "numbers before units keep their digits for the unit readings and become kanji numerals after them; "

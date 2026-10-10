@@ -907,10 +907,16 @@ def append_dictionary_entries(path, new_entries):
 _LOOKALIKES = {ord(c): "'" for c in "‘’‛′ʹ´＇"}
 _LOOKALIKES.update({ord(c): '"' for c in "“”‟″＂"})
 _LOOKALIKES.update({ord(c): "-" for c in "‐‑‒–−－"})
+# Full-width digits and Latin letters (４つ, ＤＮＡ) are the same characters to a reader; the
+# dictionaries and the reading assist see them in their usual form. Full-width punctuation
+# (，．) is left, since Japanese text may use it as its commas and full stops.
+_LOOKALIKES.update({c: c - 0xFEE0 for c in list(range(0xFF10, 0xFF1A)) + list(range(0xFF21, 0xFF3B))
+                    + list(range(0xFF41, 0xFF5B))})
 
 
 def normalize_lookalikes(text):
-    """Map typographic quotes, primes and dashes to their plain ASCII forms."""
+    """Map typographic quotes, primes and dashes, and full-width digits and letters, to their
+    plain ASCII forms."""
     return text.translate(_LOOKALIKES)
 
 
@@ -1002,14 +1008,14 @@ def _align(run, toks):
     included; None when the words cannot be placed."""
     spans, pos, digits_done = [], 0, False
     for t in toks:
-        word = t["string"]
+        word = normalize_lookalikes(t["string"])
         if run.startswith(word, pos):
             spans.append((pos, pos + len(word)))
             pos += len(word)
             digits_done = False
             continue
         start = pos
-        rest = word.lstrip("".join(_KANJI_NUMERALS) + "．")
+        rest = word.lstrip("".join(_KANJI_NUMERALS) + "．0123456789,.")
         m = _DIGITS_RE.match(run, pos)
         if m and not digits_done:
             pos = m.end()
@@ -1061,8 +1067,11 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
             t, (a, b) = toks[i], spans[i]
             prot = any(guarded[a:b])
             is_num = t["pos"] == "名詞" and t["pos_group1"] == "数"
-            numeric_word = (not is_num and t["pos_group1"] == "副詞可能"
-                            and any(c in _KANJI_NUMERALS for c in t["string"]))
+            written = normalize_lookalikes(t["string"])
+            numeric_word = (not is_num and t["pos"] == "名詞" and (
+                any(c.isdigit() for c in run[a:b])                       # 4つ, 2つ目
+                or (t["pos_group1"] == "副詞可能" and any(c in _KANJI_NUMERALS for c in written))
+                or re.fullmatch(r"[〇一二三四五六七八九十]+つ", written) is not None))   # 四つ
             if (is_num or numeric_word) and not prot:
                 # the number, its decimal point, and the counters after it, as pronounced
                 j, said = i, ""
@@ -1120,6 +1129,7 @@ def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=Non
     read, on the text as written; then the dictionaries are applied; then numbers become
     kanji numerals, after the unit readings, which need the digits."""
     japanese = reading_assist is not None and lang_suffix(lang).lstrip("_") == "ja"
+    text = normalize_lookalikes(unicodedata.normalize("NFC", text))
     if japanese:
         terms = [normalize_lookalikes(unicodedata.normalize("NFC", t)) for t, r, _ in dictionaries or [] if r]
         text = ja_assist_words(text, reading_assist, protect=terms)
