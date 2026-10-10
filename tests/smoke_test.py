@@ -1128,7 +1128,7 @@ if _pjt:
        "reading assist leaves Latin-script words and their numbers, and paragraph breaks, as they are")
     d_ = [("染色体", "せんしょくたい", ""), ("授業中", "じゅぎょうちゅう", "")]
     ok(pn.spoken_text_of("染色体中の遺伝子は3割。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
-       == "せんしょくたいチュウの遺伝子はサンワリ。"
+       == "せんしょくたいチュウの遺伝子は三割。"
        and pn.spoken_text_of("授業中に5 mgを使う。", d_, "ja", reading_assist=pn.READING_ASSIST_CHARS)
        == "じゅぎょうちゅうに五ミリグラムを使う。",
        "the words are read on the text as written, before the dictionaries, whose terms take precedence; "
@@ -1149,9 +1149,11 @@ if _pjt:
        "full-width digits are numbers too, and a number written with つ is read as pronounced")
     ok(pn.spoken_text_of("ＤＮＡの", [("DNA", "ディーエヌエー", "")], "ja", reading_assist=None) == "ディーエヌエーの",
        "a dictionary term matches text written in full-width letters")
-    ok(_KATA_ONLY.fullmatch(ra_("2026年")) is not None and ra_("3.5 mLを") == "三点五ミリリットルを"
-       and ra_("1,000 mLと3.5倍") == "千ミリリットルとサンテンゴバイ",
-       "numbers before units keep their digits for the unit readings and become kanji numerals after them; "
+    ok(ra_("2026年") == "二千二十六年" and ra_("七割の") == "七割の" and ra_("3.5 mLを") == "三点五ミリリットルを"
+       and ra_("1,000 mLと3.5倍") == "千ミリリットルと三点五倍" and ra_("2週間毎に") == "二週間ゴトに",
+       "a number read as written stays in kanji numerals (the model reads them naturally); numbers before "
+       "units keep their digits for the unit readings")
+    ok(_KATA_ONLY.fullmatch(pn.ja_numbers_kanji("ニセンニジューロクネン")) is not None,
        "katakana already written is not read as numbers")
 else:
     print("SKIP reading assist: pyopenjtalk is not installed")
@@ -1199,12 +1201,13 @@ def _units(spec):
     """[(word, kind, kana)] -> kana units as kana_units makes them"""
     return [(c, kind, word, ti) for ti, (word, kind, kana) in enumerate(spec) for c in kana]
 _a = _units([("前期", "kanji", "ゼンキ"), ("prophase", "latin", "ピーアールオーピーエイチエーエスイー"),
-             ("の", "kana", "ノ"), ("精製", "kanji", "セーセー"), ("と", "kana", "ト"),
-             ("23対", "kanji", "ニジューサンツイ"), ("です", "kana", "デス")])
+             ("についてです", "kana", "ニツイテデス"), ("精製", "kanji", "セーセー"), ("をおこないます", "kana", "ヲオコナイマス"),
+             ("23対", "kanji", "ニジューサンツイ"), ("でございます", "kana", "デゴザイマス")])
 _b = _units([("前期", "kanji", "ゼンキ"), ("プロフェーズ", "kana", "プロフェーズ"),
-             ("の", "kana", "ノ"), ("聖", "kanji", "ヒジリ"), ("正", "kanji", "タダシ"), ("と", "kana", "ト"),
-             ("二十", "kanji", "ニジュー"), ("三つ", "kanji", "ミッツ"), ("い", "kana", "イ"), ("です", "kana", "デス")])
-_txt = "前期prophaseの精製と23対です"
+             ("についてです", "kana", "ニツイテデス"), ("聖", "kanji", "ヒジリ"), ("正", "kanji", "タダシ"),
+             ("をおこないます", "kana", "ヲオコナイマス"),
+             ("二十", "kanji", "ニジュー"), ("三つ", "kanji", "ミッツ"), ("い", "kana", "イ"), ("でございます", "kana", "デゴザイマス")])
+_txt = "前期prophaseについてです精製をおこないます23対でございます"
 _cl = pn.classify_differences(_a, _b, _txt)
 _kinds = [k for k, *_ in _cl]
 ok(pn.DIFF_LATIN in _kinds and pn.DIFF_KANJI in _kinds and pn.DIFF_NARRATION in _kinds,
@@ -1216,5 +1219,11 @@ _narr = [(_A[i1:i2], _B[j1:j2]) for k, i1, i2, j1, j2 in _cl if k == pn.DIFF_NAR
 ok(_narr and all("サン" in x or "ミッ" in y for x, y in _narr) and _n == len(_narr)
    and pn.kana_sequence_scores(_an, _bn)[0] > pn.kana_sequence_scores(_A, _B)[0],
    "only the narration's differences count in the scores; a misread number stays the narration's")
+_a2 = _units([("を", "kana", "ヲ"), ("2", "kana", "ニ"), ("3つい", "kana", "ジューサンツイ"), ("で", "kana", "デ")])
+_b2 = _units([("を", "kana", "ヲ"), ("２", "kana", "ニ"), ("３つ", "kana", "ミッツ"), ("い", "kana", "イ"), ("で", "kana", "デ")])
+ok(all(k == pn.DIFF_DIGITS for k, *_ in pn.classify_differences(_a2, _b2, "ニジューサンツイ", "23対"))
+   and pn._same_sound("ケイセイヲコウ") == list("ケーセーオコー"),
+   "a number the recognizer wrote in digits, the same as the note's, is put down to the recognizer; "
+   "long vowels and ヲ are written alike before comparing")
 
 print("ALL TESTS PASSED")

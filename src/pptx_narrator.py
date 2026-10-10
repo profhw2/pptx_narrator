@@ -1073,14 +1073,33 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
                 or (t["pos_group1"] == "副詞可能" and any(c in _KANJI_NUMERALS for c in written))
                 or re.fullmatch(r"[〇一二三四五六七八九十]+つ", written) is not None))   # 四つ
             if (is_num or numeric_word) and not prot:
-                # the number, its decimal point, and the counters after it, as pronounced
-                j, said = i, ""
+                # the number with its decimal point and the counter after it: as kanji numerals
+                # where it is read as written (七割, 二千二十六年), the model reads those well;
+                # in katakana as pronounced where the sound changes or the word is read its own
+                # way (十分 ジュップン, 三本 サンボン, 三日 ミッカ, 四つ ヨッツ)
+                j = i
                 while j < len(toks) and (j == i or (toks[j]["pos"] == "名詞" and toks[j]["pos_group1"] in ("数", "接尾"))):
                     if any(guarded[spans[j][0]:spans[j][1]]):
                         break
-                    said += _pron(toks[j])
                     j += 1
-                out.append([said, True, False, t])
+                group = toks[i:j]
+                k = 0
+                while k < len(group) and (group[k]["pos_group1"] == "数" or group[k]["string"] == "．"):
+                    k += 1
+                core = group[:k + 1] if k < len(group) else group      # the number and its counter
+                rest = group[len(core):]                                # suffixes after the counter
+                pron = _same_sound("".join(_pron(x) for x in core))
+                read = _same_sound("".join((x.get("read") or x["string"]) for x in core))
+                if numeric_word or pron != read:
+                    out.append(["".join(_pron(x) for x in group), True, False, t])
+                else:
+                    said = _KANJI_DECIMAL_RE.sub("点", "".join(normalize_lookalikes(x["string"]) for x in core))
+                    for x in rest:
+                        if chars and any(c in chars for c in x["string"]) and x.get("read"):
+                            said += x["read"]
+                        else:
+                            said += x["string"]
+                    out.append([said, True, False, t])
                 i = j
                 continue
             word = t["string"]
@@ -1894,11 +1913,32 @@ def kana_scores(text_intended, text_asr):
 #     (prophase -> ピーアールオー...), while the recognizer writes what it heard (プロフェーズ);
 #   - the recognizer wrote a word of the narration (in kanji or kana) with kanji that are not in
 #     the narration at all (聖正 for 精製, 線粒体 for せんしょくたい), which are then read in their
-#     own way; numbers are excepted, since a misread number is the narration's error.
+#     own way (numbers excepted);
+#   - the recognizer wrote a number in digits, the same number as the narration's, and only the
+#     reading of the digits differs (２３つい read ニジューミッツイ).
 # Only the other differences count in the scores and the flag.
 DIFF_NARRATION, DIFF_LATIN, DIFF_KANJI = "narration", "Latin-script word", "transcript kanji"
 _LATIN_CHAR_RE = re.compile(r"[A-Za-z\uff21-\uff3a\uff41-\uff5a]")
 _KANJI_CHAR_RE = re.compile(r"[\u3400-\u9fff\u3005]")
+
+
+_ROWS = {"a": "アカサタナハマヤラワガザダバパァャ", "i": "イキシチニヒミリギジヂビピィ",
+         "u": "ウクスツヌフムユルグズヅブプゥュヴ", "e": "エケセテネヘメレゲゼデベペェ",
+         "o": "オコソトノホモヨロヲゴゾドボポォョ"}
+_VOWEL_OF = {c: v for v, cs in _ROWS.items() for c in cs}
+_SAME_SOUND = str.maketrans({"ヲ": "オ", "ヂ": "ジ", "ヅ": "ズ"})
+
+
+def _same_sound(chars):
+    """The kana written the same way where they sound the same: a long vowel written with イ
+    or ウ (ケイ, コウ, ユウ) as ー, ヲ as オ, ヂ and ヅ as ジ and ズ; one character for one, so
+    that the places of the differences do not move."""
+    out = list("".join(chars).translate(_SAME_SOUND))
+    for k in range(1, len(out)):
+        v = _VOWEL_OF.get(out[k - 1]) if out[k - 1] != "ー" else None
+        if (out[k] == "イ" and v == "e") or (out[k] == "ウ" and v in ("o", "u")):
+            out[k] = "ー"
+    return out
 
 
 def kana_units(text):
@@ -1914,7 +1954,8 @@ def kana_units(text):
         kind = ("latin" if _LATIN_CHAR_RE.search(word)
                 else "kanji" if _KANJI_CHAR_RE.search(word) else "kana")
         units.extend((c, kind, word, ti) for c in said if not _KANA_PUNCT_RE.match(c))
-    return units
+    same = _same_sound(u[0] for u in units)
+    return [(c,) + u[1:] for c, u in zip(same, units)]
 
 
 def _foreign_kanji_share(units, intended_text):
@@ -1947,25 +1988,57 @@ def _foreign_kanji_share(units, intended_text):
     return foreign / len(units)
 
 
-def classify_differences(a_units, b_units, intended_text):
-    """[(kind, i1, i2, j1, j2)] for each place where the two kana sequences differ."""
+DIFF_DIGITS = "transcript digits"
+_DIGIT_RUN_RE = re.compile(r"[0-9]+")
+
+
+def _digits_heard_right(units, reference):
+    """True when the transcript wrote the number in digits and the narration has the same
+    number: the recognizer heard it right, and only the reading of its digits (３つ read ミッツ
+    where the narration said サンツイ) makes the difference."""
+    numbers = {d for _, _, word, _ in units for d in _DIGIT_RUN_RE.findall(normalize_lookalikes(word))}
+    return bool(numbers) and all(n in reference for n in numbers)
+
+
+def classify_differences(a_units, b_units, intended_text, reference_text=""):
+    """[(kind, i1, i2, j1, j2)] for each place where the two kana sequences differ. Places
+    no more than two matching characters apart are judged together (one misheard word can
+    come out as a deletion next to an insertion)."""
     a = "".join(u[0] for u in a_units)
     b = "".join(u[0] for u in b_units)
-    out = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+    ops = [op for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()]
+    groups, current = [], []
+    for k, (tag, i1, i2, j1, j2) in enumerate(ops):
         if tag == "equal":
-            continue
-        a_kinds = {u[1] for u in a_units[i1:i2]}
-        near = {a_units[k][1] for k in (i1 - 1, i1) if 0 <= k < len(a_units)} if i1 == i2 else set()
-        if "latin" in a_kinds or "latin" in near:
+            if current and (i2 - i1) <= 2 and k + 1 < len(ops):
+                current.append((tag, i1, i2, j1, j2))
+            elif current:
+                groups.append(current)
+                current = []
+        else:
+            current.append((tag, i1, i2, j1, j2))
+    if current:
+        groups.append(current)
+    reference = normalize_lookalikes(intended_text + "\n" + (reference_text or ""))
+    latin_at = [k for k, u in enumerate(a_units) if u[1] == "latin"]
+    out = []
+    for g in groups:
+        while g and g[-1][0] == "equal":
+            g.pop()
+        i1, i2, j1, j2 = g[0][1], g[-1][2], g[0][3], g[-1][4]
+        near_latin = any(i1 - 3 <= k < i2 + 3 for k in latin_at)
+        if near_latin:
             kind = DIFF_LATIN
+        elif _digits_heard_right(b_units[j1:j2], reference):
+            kind = DIFF_DIGITS
         elif i1 < i2 and _foreign_kanji_share(b_units[j1:j2], intended_text) >= 0.5:
-            # mostly kanji the narration does not have, not a number (a misread number stays
-            # the narration's)
+            # mostly kanji the narration does not have, not a number
             kind = DIFF_KANJI
         else:
             kind = DIFF_NARRATION
-        out.append((kind, i1, i2, j1, j2))
+        for tag, a1, a2, b1, b2 in g:
+            if tag != "equal":
+                out.append((kind, a1, a2, b1, b2))
     return out
 
 
@@ -2058,7 +2131,9 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
                 a_units, b_units = kana_units(intended_text), kana_units(asr_text)
                 norm_intended = "".join(u[0] for u in a_units)
                 norm_asr = "".join(u[0] for u in b_units)
-                classified = classify_differences(a_units, b_units, intended_text)
+                text_p = os.path.join(workspace_dir, text_filename(slide_num, lang))
+                note_text = _read_text(text_p) if os.path.exists(text_p) else ""
+                classified = classify_differences(a_units, b_units, intended_text, note_text)
                 a_n, b_n = narration_sequences(norm_intended, norm_asr, classified)
                 score, cer = kana_sequence_scores(a_n, b_n)
             else:
