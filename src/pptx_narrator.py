@@ -193,7 +193,7 @@ def detect_note_languages(texts, known=None):
     result = {}
     for n, (lang, confident) in first.items():
         if not confident and majority and lang != majority:
-            logger.info(f"Slide #{n}: short/ambiguous note ('{lang}'); using the deck language '{majority}'")
+            detail("language guessed", f"Slide #{n}: short/ambiguous note ('{lang}'); using the deck language '{majority}'")
             lang = majority
         result[n] = lang
     return result
@@ -227,6 +227,39 @@ def find_source_text(workspace_dir, slide_num, source_lang, exclude_lang=None):
 logging.basicConfig(level=logging.WARNING, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Messages about what was left as it was, or about the inner steps, are written to the log of
+# the workspace but not shown on the screen unless --verbose is given; the screen shows what
+# was done and what is to be done, and one line counts what it left out.
+VERBOSE = {"on": False}
+_DETAILS_LEFT_OUT = Counter()
+
+
+def detail(kind, message):
+    """Log a message of this kind for the log only (shown with --verbose)."""
+    logger.info(message, extra={"detail": kind})
+
+
+class _ScreenFilter(logging.Filter):
+    def filter(self, record):
+        kind = getattr(record, "detail", None)
+        if kind and not VERBOSE["on"]:
+            _DETAILS_LEFT_OUT[kind] += 1
+            return False
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_ScreenFilter())
+
+
+def report_details_left_out():
+    if _DETAILS_LEFT_OUT and not VERBOSE["on"]:
+        n = sum(_DETAILS_LEFT_OUT.values())
+        kinds = ", ".join(f"{k} {c}" for k, c in _DETAILS_LEFT_OUT.most_common())
+        print(f"({n} detail line(s) not shown: {kinds}; --verbose shows them, the log of the "
+              "workspace has them all)", file=sys.stderr)
+    _DETAILS_LEFT_OUT.clear()
 
 # ------------------------------------------
 # Structured notes (translated narration + original note)
@@ -550,7 +583,7 @@ def load_letter_map(json_path: str) -> dict:
         return {}
     try:
         with open(json_path, "r", encoding="utf-8") as f:
-            logger.info(f"Loaded letter map from: {json_path}")
+            detail("setup", f"Loaded letter map from: {json_path}")
             return json.load(f)
     except Exception as e:
         logger.error(f"Failed to load letter map '{json_path}': {e}")
@@ -624,7 +657,7 @@ def step_scan_and_update_dict(workspace_dir, dict_path, entries, requested_slide
     --target-lang when it exists, with provisional readings filled in; otherwise (or when
     combined with --translate) the notes to be translated, with blank replacements for review.
     """
-    logger.info("--- [Option: Scan] Scanning text for technical terms ---")
+    detail("step", "--- [Option: Scan] Scanning text for technical terms ---")
 
     _ensure_nltk_data()
     from nltk.corpus import stopwords, words
@@ -879,7 +912,7 @@ def load_dictionaries(paths, lang=None):
         entries = read_dictionary_file(p, lang)
         for term, repl, typ in entries:
             merged[(term, typ)] = repl
-        logger.info(f"Dictionary {p}: {len(entries)} entries")
+        detail("setup", f"Dictionary {p}: {len(entries)} entries")
     return [(term, repl, typ) for (term, typ), repl in merged.items()]
 
 
@@ -1242,7 +1275,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     the workspace is replaced only with update (when it was not edited in the workspace
     since it was written) or overwrite. Returns the number of texts found in the deck.
     """
-    logger.info("--- [Option: Extract] Extracting Notes ---")
+    detail("step", "--- [Option: Extract] Extracting Notes ---")
     prs = Presentation(pptx_path)
     plain, headed = {}, {}
     raw_fingerprints = {}
@@ -1251,19 +1284,19 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         slide = prs.slides[slide_num - 1]
 
         if slide._element.get('show') == '0':
-            logger.info(f"Slide #{slide_num} is a hidden slide (skipped)")
+            detail("hidden", f"Slide #{slide_num} is a hidden slide (skipped)")
             continue
 
         struck = []
         raw_text = _slide_note_raw(slide, struck)
         if struck:
-            logger.info(f"Slide #{slide_num}: left out {len(struck)} struck-through passage(s): "
+            detail("struck-through", f"Slide #{slide_num}: left out {len(struck)} struck-through passage(s): "
                         + ", ".join(repr(t) for t in struck[:5]) + (" ..." if len(struck) > 5 else ""))
         raw_fingerprints[slide_num] = text_fingerprint(raw_text)
 
         txt = raw_text.translate(_ZERO_WIDTH).strip()
         if not txt:
-            logger.info(f"Slide #{slide_num} has no notes (skipped)")
+            detail("no notes", f"Slide #{slide_num} has no notes (skipped)")
             continue
         parts = [dict(s, text=_section_text(s["lines"])) for s in split_note_sections(txt.split("\n"))
                  if s["lang"]]
@@ -1285,7 +1318,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
         for n, txt in plain.items():
             detected, confident = detect_language(txt)
             if confident and base_lang(detected) != base_lang(source_lang):
-                logger.info(f"Slide #{n}: note detected as '{detected}', not requested '{source_lang}' (skipped)")
+                detail("other language", f"Slide #{n}: note detected as '{detected}', not requested '{source_lang}' (skipped)")
                 continue
             languages[n] = source_lang
 
@@ -1293,7 +1326,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     for n, parts in headed.items():
         for part in parts:
             if source_lang != "auto" and base_lang(part["lang"]) != base_lang(source_lang):
-                logger.info(f"Slide #{n}: the {part['lang']} part of the note is not the requested "
+                detail("other language", f"Slide #{n}: the {part['lang']} part of the note is not the requested "
                             f"'{source_lang}' (skipped)")
                 continue
             items.append((n, part["lang"], part["text"], part["info"]))
@@ -1301,7 +1334,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
 
     baseline = _load_note_baseline(workspace_dir)
     manifest = _load_manifest(workspace_dir)
-    found, kept, translations_read = 0, [], False
+    found, kept, kept_deck, translations_read = 0, [], [], False
     for n, lang, text, info in items:
         found += 1
         name = text_filename(n, lang)
@@ -1316,19 +1349,19 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                 known |= {entry.get("extracted"), entry.get("packed")} - {None}
             unedited = cur_fp in known
             if not (overwrite or (update and unedited)):
-                kept.append(n)
+                (kept_deck if unedited else kept).append(n)
                 if unedited:
-                    logger.warning(f"Slide #{n}: the note in the deck has changed since {name} was written; "
+                    detail("kept", f"Slide #{n}: the note in the deck has changed since {name} was written; "
                                    f"{name} is kept (add --update to take the note in again, or --overwrite).")
                 else:
-                    logger.warning(f"Slide #{n}: {name} differs from the note in the deck and was edited in the "
+                    detail("kept", f"Slide #{n}: {name} differs from the note in the deck and was edited in the "
                                    f"workspace (or has no record of being written); it is kept "
                                    f"(add --overwrite to replace it with the note).")
                 continue
             logger.info(f"Slide #{n}: {name} replaced with the note in the deck "
                         f"({'--overwrite' if overwrite else '--update'}).")
         elif os.path.exists(path):
-            logger.info(f"Slide #{n}: {name} is already the same as the note ({lang}).")
+            detail("unchanged", f"Slide #{n}: {name} is already the same as the note ({lang}).")
         else:
             logger.info(f"Slide #{n}: note extracted to {name} (language: {lang}).")
         if not (os.path.exists(path) and text_fingerprint(_read_text(path)) == new_fp):
@@ -1346,7 +1379,7 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
                 "source_lang": info["source_lang"], "source_fingerprint": info.get("source_fingerprint", ""),
                 "translated_at": info.get("translated_at", ""), "fingerprint": None if edited else new_fp,
                 "edited": edited, "edited_at": info.get("edited_at", "")}
-            logger.info(f"Slide #{n}: {name} was translated from {info['source_lang']}"
+            detail("unchanged", f"Slide #{n}: {name} was translated from {info['source_lang']}"
                         + (" and edited since" if edited else "") + " (from the heading in the note).")
 
     if items and baseline != _load_note_baseline(workspace_dir):
@@ -1357,9 +1390,14 @@ def step_extract_notes(pptx_path, workspace_dir, requested_slides, source_lang="
     counts = Counter(lang for _, lang, _, _ in items)
     if counts:
         logger.info("Note languages: " + ", ".join(f"{l} ({c} slides)" for l, c in counts.most_common()))
+    if kept_deck:
+        logger.warning("Notes changed in the deck since their texts were written, texts kept, on slide(s): "
+                       + ", ".join(map(str, sorted(set(kept_deck))))
+                       + " (--update takes the notes in).")
     if kept:
-        logger.warning("Texts kept although the note differs, on slide(s): "
-                       + ", ".join(map(str, sorted(set(kept)))) + ".")
+        logger.warning("Texts edited in the workspace that differ from the notes in the deck, kept, on slide(s): "
+                       + ", ".join(map(str, sorted(set(kept))))
+                       + " (--overwrite replaces them with the notes; pack writes them into the deck).")
     return found
 
 # ------------------------------------------
@@ -1397,7 +1435,7 @@ class LLMTranslator:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
             dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
-            logger.info(f"Loading translation model {self.model_id} on {self.device}...")
+            detail("setup", f"Loading translation model {self.model_id} on {self.device}...")
             self._tok = AutoTokenizer.from_pretrained(self.model_id)
             self._model = AutoModelForCausalLM.from_pretrained(self.model_id, torch_dtype=dtype)
             self._model.to(self.device).eval()
@@ -1451,7 +1489,7 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
             was made, unless the translation was edited since (that edit is kept).
     overwrite: translate again every selected slide.
     """
-    logger.info(f"--- [Option: Translate] Translating notes into '{target_lang}' with {model} ---")
+    detail("step", f"--- [Option: Translate] Translating notes into '{target_lang}' with {model} ---")
     translator = None
     sources_found = 0
     manifest = _load_manifest(workspace_dir)
@@ -1477,7 +1515,7 @@ def step_translate_notes(workspace_dir, requested_slides, source_lang, target_la
                                f"translated from {os.path.basename(src_p)}; kept (add --overwrite to replace it).")
                 continue
             if not source_changed:
-                logger.info(f"Slide #{slide_num}: {name} is up to date with its source; kept.")
+                detail("unchanged", f"Slide #{slide_num}: {name} is up to date with its source; kept.")
                 continue
             if not update:
                 logger.warning(f"Slide #{slide_num}: {name} already exists and its source has changed "
@@ -1546,7 +1584,7 @@ def step_generate_audio(
     letter_map=None,
     on_made=None,
 ):
-    logger.info("--- [Option: TTS / engine=gpt_sovits] Generating Audio ---")
+    detail("step", "--- [Option: TTS / engine=gpt_sovits] Generating Audio ---")
     text_lang = gpt_sovits_language(lang)
     prompt_lang = gpt_sovits_language(ref_lang)
     if text_lang is None or prompt_lang is None:
@@ -1739,7 +1777,7 @@ def _load_qwen3_model(model_size, device):
         except Exception:
             pass
         model_name = f"Qwen/Qwen3-TTS-12Hz-{model_size}-Base"
-        logger.info(f"Loading Qwen3-TTS model ({model_name}, device={device})...")
+        detail("setup", f"Loading Qwen3-TTS model ({model_name}, device={device})...")
         base_kwargs = dict(device_map=device)
         if str(device).startswith("cuda"):
             import importlib.util
@@ -1751,7 +1789,7 @@ def _load_qwen3_model(model_size, device):
         for dtype in (torch.bfloat16, torch.float16, torch.float32):
             try:
                 model = Qwen3TTSModel.from_pretrained(model_name, dtype=dtype, **base_kwargs)
-                logger.info(f"Successfully loaded model with dtype={dtype}")
+                detail("setup", f"Successfully loaded model with dtype={dtype}")
                 break
             except Exception as e:
                 last_err = e
@@ -1781,7 +1819,7 @@ def step_generate_audio_qwen3(
     on_made=None,
     reading_assist=READING_ASSIST_CHARS,
 ):
-    logger.info("--- [Option: TTS / engine=qwen3] Generating Audio ---")
+    detail("step", "--- [Option: TTS / engine=qwen3] Generating Audio ---")
     language = qwen3_language(lang)
     if language is None:
         logger.error(f"Qwen3-TTS does not support '{lang}' (supported: {', '.join(QWEN3_LANGUAGES)})")
@@ -1801,7 +1839,7 @@ def step_generate_audio_qwen3(
 
     voice_clone_prompt = None
     try:
-        logger.info("Analyzing reference audio (create_voice_clone_prompt)...")
+        detail("setup", "Analyzing reference audio (create_voice_clone_prompt)...")
         voice_clone_prompt = model.create_voice_clone_prompt(ref_audio=ref_wav, ref_text=ref_txt)
     except AttributeError:
         logger.warning(
@@ -2137,7 +2175,7 @@ def text_scores(text_intended, text_asr):
 def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
                        asr_model_size="small", asr_device="cpu", threshold=0.85,
                        cer_threshold=None, max_difference=40, min_difference=4):
-    logger.info("--- [Option: Verify] ASR round-trip check ---")
+    detail("step", "--- [Option: Verify] ASR round-trip check ---")
     is_ja = base_lang(lang) == "ja"
     try:
         from faster_whisper import WhisperModel
@@ -2147,7 +2185,7 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
         raise RuntimeError(f"verify needs a library that is not installed ({e}); "
                            "pip install 'pptx-narrator[verify]'") from e
 
-    logger.info(f"Loading Whisper model ({asr_model_size}, device={asr_device})...")
+    detail("setup", f"Loading Whisper model ({asr_model_size}, device={asr_device})...")
     asr_model = WhisperModel(asr_model_size, device=asr_device, compute_type="int8")
 
     results, differences, asr_differences = [], [], []
@@ -2208,7 +2246,8 @@ def step_verify_audio(workspace_dir, requested_slides, lang, model_label,
 
         results.append((slide_num, round(score, 4), round(cer, 4), status, n_runs, worst_run, n_asr,
                         intended_text, asr_text, norm_intended, norm_asr))
-        logger.info(f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
+        (logger.info if status != "OK" else lambda m: detail("verified OK", m))(
+                    f"Slide {slide_num}: similarity={score:.2f}, CER={cer:.2f}, "
                     f"{n_runs} difference(s), longest {worst_run} characters"
                     + (f", {n_asr} put down to the recognizer" if n_asr else "") + f" [{status}]")
 
@@ -2364,7 +2403,7 @@ def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, ove
                     if not lang or lang_suffix(l) == lang_suffix(lang)]
         if not ws_langs:
             if lang:
-                logger.info(f"Slide #{n}: no {lang} text in the workspace (note left as is).")
+                detail("unchanged", f"Slide #{n}: no {lang} text in the workspace (note left as is).")
             continue
         body = slide.notes_slide.notes_text_frame._txBody
         sections = _note_sections_xml(body)
@@ -2398,7 +2437,7 @@ def _pack_notes(prs, workspace_dir, requested_slides, lang, targets, update, ove
                 continue
             z = text_fingerprint(_section_text(s["lines"]))
             if z == y:
-                logger.info(f"Slide #{n}: the {l} part of the note is already the same as {name}.")
+                detail("unchanged", f"Slide #{n}: the {l} part of the note is already the same as {name}.")
                 continue
             if "text" not in targets:
                 mismatched.append(n)
@@ -2617,7 +2656,7 @@ def step_pack_pptx(original_pptx, output_pptx, workspace_dir, requested_slides, 
     targets: subset of {"audio", "text"} (default: both).
     update / overwrite: see _pack_notes; update also leaves out audio the deck already has.
     """
-    logger.info("--- [Option: Pack] Rebuilding PPTX ---")
+    detail("step", "--- [Option: Pack] Rebuilding PPTX ---")
     targets = set(targets or {"audio", "text"})
     if audio_lang == "same":
         audio_lang = lang
@@ -2662,7 +2701,7 @@ def _pack_audio(tmp_pptx, output_pptx, workspace_dir, requested_slides, targets,
                                    f"was made; the audio does not say the text (synthesize it again).")
                 if update and _slide_audio_matches(tmpdir, slide_parts[s_num - 1], m4a_p):
                     audio_same += 1
-                    logger.info(f"Slide #{s_num}: the deck already has this audio (left as is, --update).")
+                    detail("unchanged", f"Slide #{s_num}: the deck already has this audio (left as is, --update).")
                     continue
                 if embed_slide_narration(tmpdir, s_num, m4a_p, len(AudioSegment.from_file(m4a_p)),
                                          slide_w, slide_h, slide_part=slide_parts[s_num - 1],
@@ -2900,7 +2939,7 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
 
     slide_xml, removed = remove_recorded_show_data(slide_xml, remove_recorded)
     for what in removed:
-        logger.info(f"Slide #{s_num}: removed the {what} of the previous recording.")
+        detail("audio cleanup", f"Slide #{s_num}: removed the {what} of the previous recording.")
     if "<p:contentPart" in slide_xml:
         # Ink drawn during a recording cannot be told apart from ink drawn while editing, which
         # belongs to the slide, so neither is removed.
@@ -2935,10 +2974,10 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
             if moved != pic:
                 slide_xml = slide_xml.replace(pic, moved, 1)
                 pic = moved
-                logger.info(f"Slide #{s_num}: moved the audio icon next to the slide, out of the visible area.")
+                detail("audio cleanup", f"Slide #{s_num}: moved the audio icon next to the slide, out of the visible area.")
         slide_xml, n_cleared = clear_media_playback_settings(slide_xml, rel_ids)
         if n_cleared:
-            logger.info(f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
+            detail("audio cleanup", f"Slide #{s_num}: removed trim/fade/bookmark settings of the previous audio.")
         status = "replaced"
     else:
         if '<p:timing' in slide_xml:
@@ -2978,7 +3017,7 @@ def embed_slide_narration(pkg_dir, s_num, audio_path, dur_ms, slide_w=12192000, 
     os.makedirs(os.path.dirname(rels_p), exist_ok=True)
     with open(rels_p, "w", encoding="utf-8") as f:
         f.write(rels_xml)
-    logger.info(f"Slide #{s_num}: narration {status} ({dur_ms} ms).")
+    detail("audio cleanup", f"Slide #{s_num}: narration {status} ({dur_ms} ms).")
     return status
 
 
@@ -3365,6 +3404,10 @@ def _add(group, *names, **kwargs):
 
 
 def _add_common_options(parser, config_values):
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show every message on the screen, also those about what was left as it\n"
+                             "was and the inner steps (they are always in the log of the workspace);\n"
+                             "may stand anywhere on the command line")
     parser.add_argument("--config", default=None,
                         help="TOML configuration file (default: ./pptx_narrator.toml when present)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -3971,6 +4014,17 @@ def _check_command_line(boot, parser):
 
 
 def main(argv=None):
+    # --verbose may stand anywhere: it only decides what the screen shows
+    argv = list(sys.argv[1:] if argv is None else argv)
+    VERBOSE["on"] = any(a in ("--verbose", "-v") for a in argv)
+    argv = [a for a in argv if a not in ("--verbose", "-v")]
+    try:
+        return _main(argv)
+    finally:
+        report_details_left_out()
+
+
+def _main(argv):
     # Parse WS and the command first without loading a config, so that --config can be honored.
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
@@ -4022,7 +4076,7 @@ def main(argv=None):
         show_history(ws, dates=effective.get("dates"))
         return
     log_handler = _open_workspace_log(ws, argv)
-    logger.info(f"Workspace: {ws}")
+    detail("setup", f"Workspace: {ws}")
     try:
         if effective.get("dry_run") and command in DRY_RUN_COMMANDS:
             _dry_run(command, args, effective, config, config_path, parser, ws)
@@ -4081,7 +4135,7 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
                          + "); choose one with --lang.")
         audio_lang = audio_langs[0] if audio_langs else None
         if audio_lang:
-            logger.info(f"Audio: {audio_lang} (the only language with audio in this workspace).")
+            detail("setup", f"Audio: {audio_lang} (the only language with audio in this workspace).")
     if command in {"verify", "pack"} and audio_lang:
         configured = _config_for_command(config, command)
         model_is_explicit = any(getattr(args, key, None) is not None
@@ -4188,7 +4242,10 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
         to_make = [n for n, make, _ in plan if make]
         verb = "would be synthesized" if effective["dry_run"] else "synthesized"
         for n, make, why in plan:
-            logger.info(f"Slide #{n}: {verb if make else 'left as it is'} ({why}).")
+            if make:
+                logger.info(f"Slide #{n}: {verb} ({why}).")
+            else:
+                detail("left as it is", f"Slide #{n}: left as it is ({why}).")
         if effective["dry_run"]:
             _say(f"Dry run: {len(to_make)} slide(s) would be synthesized"
                  + (f" ({', '.join(map(str, to_make))})" if to_make else "") + "; nothing was changed.")
@@ -4206,7 +4263,7 @@ def _run_command(command, args, effective, config, config_path, parser, ws):
         if effective["engine"] == "gpt_sovits":
             config_model = MODELS_CONFIG[effective["model"]]
             base_url = effective["api_url"].rstrip("/")
-            logger.info(f"Switching GPT-SoVITS weights to {effective['model']}...")
+            detail("setup", f"Switching GPT-SoVITS weights to {effective['model']}...")
             try:
                 requests.get(f"{base_url}/set_gpt_weights", params={"weights_path": config_model["gpt"]}, timeout=300)
                 requests.get(f"{base_url}/set_sovits_weights", params={"weights_path": config_model["sovits"]}, timeout=300)
@@ -4370,7 +4427,7 @@ def _open_workspace_log(ws, argv):
     handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
     logger.addHandler(handler)
     words = sys.argv[1:] if argv is None else argv
-    logger.info("==== pptx-narrator " + " ".join(shlex.quote(w) for w in words) + f" (version {__version__})")
+    detail("step", "==== pptx-narrator " + " ".join(shlex.quote(w) for w in words) + f" (version {__version__})")
     return handler
 
 
@@ -4671,7 +4728,7 @@ def _reopen_workspace_log(workspace_dir):
     handler = logging.FileHandler(os.path.join(workspace_dir, LOG_FILE), encoding="utf-8")
     handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
     logger.addHandler(handler)
-    logger.info("==== the earlier log was moved to map_archive/ when the workspace was renumbered")
+    detail("step", "==== the earlier log was moved to map_archive/ when the workspace was renumbered")
 
 
 def check_slide_map(workspace_dir, deck_path, command):

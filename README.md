@@ -252,6 +252,8 @@ A workspace made before slide IDs were recorded is matched by the fingerprints o
 pptx-narrator WS COMMAND [INPUT] [OUTPUT] [OPTIONS]
 ```
 
+The screen shows what a command did or is to do and the warnings; messages about what was left as it was and the inner steps go to the log of the workspace (`pptx_narrator.log`) only, counted in one line at the end. `--verbose`, anywhere on the command line, shows them all. The log goes to the standard error, the closing summary to the standard output.
+
 `WS` is the workspace directory of one deck. `INPUT` and `OUTPUT` are the files outside the workspace that a command reads or writes; the files inside it are chosen with `--lang`, `--slides` and the model options, not by path. Nothing is carried over from an earlier run: what a command needs is given on its command line or in the configuration file. Existing files, notes and audio are not overwritten unless `--update` (write what has changed) or `--overwrite` (write everything selected) is given; `pack` writes the audio of the workspace into the deck it is told to write. `--dry-run` (extract, scan, translate, synthesize, pack) shows what a command would write, slide by slide with the reason, and changes nothing; `map` shows its changes unless `--apply` is given.
 
 `--lang` gives the language of the texts a command works on; it is short for giving `--in-lang` and `--out-lang` the same language. `translate` reads `--in-lang` and writes `--out-lang`. Every command accepts `--slides` (e.g. `4,7-9`).
