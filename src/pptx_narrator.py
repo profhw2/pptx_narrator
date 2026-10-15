@@ -1110,9 +1110,15 @@ def ja_assist_words(text, chars=READING_ASSIST_CHARS, protect=()):
             return run                                  # cannot place the words: as written
         out = []                                        # [text, converted?, protected?, token]
         i = 0
+        prot = False
         while i < len(toks):
             t, (a, b) = toks[i], spans[i]
-            prot = any(guarded[a:b])
+            # a word with no characters of its own in the text (千 of 二千 for "2000") belongs
+            # to the word before it, a dictionary term included
+            prot = any(guarded[a:b]) if b > a else prot
+            if b == a and prot:
+                i += 1
+                continue
             is_num = t["pos"] == "名詞" and t["pos_group1"] == "数"
             written = normalize_lookalikes(t["string"])
             numeric_word = (not is_num and t["pos"] == "名詞" and (
@@ -1190,6 +1196,137 @@ def ja_numbers_kanji(text):
     return _LONE_DIGITS_RE.sub(kanji, text)
 
 
+# ------------------------------------------
+# Fractions (a/b), read the way the language reads them
+# ------------------------------------------
+# A number, a slash and a number (1/2, 3/4, 1/2000) is read as a fraction: in Japanese,
+# Chinese and Korean the denominator first (二千分の一, 二分之一, 이분의 일), in English the
+# numerator as a cardinal and the denominator as an ordinal (one third, three eighths; one
+# half, one quarter). Other languages leave it as written. Something else written the same
+# way, such as a date, is to be written otherwise in the note; a fraction the dictionary
+# has is left to the dictionary.
+_FRACTION_RE = re.compile(r"(?<![A-Za-z0-9_/.,])([0-9]+)/([0-9]+)(?![A-Za-z0-9_/]|[.,][0-9])")
+_KANJI_DIGITS = "〇一二三四五六七八九"
+
+
+def _kanji_number(n, chinese=False):
+    """An integer in kanji numerals (2000 二千, 10 十; 一千 in Chinese)."""
+    if n == 0:
+        return "〇"
+    out = ""
+    for unit_value, unit in ((10 ** 12, "兆"), (10 ** 8, "億"), (10 ** 4, "万"), (1, "")):
+        part, n = divmod(n, unit_value)
+        if not part:
+            continue
+        text = ""
+        for value, name in ((1000, "千"), (100, "百"), (10, "十")):
+            digit, part = divmod(part, value)
+            if digit:
+                text += ("" if digit == 1 and not (chinese and value == 1000) else _KANJI_DIGITS[digit]) + name
+        if part:
+            text += _KANJI_DIGITS[part]
+        out += text + unit
+    return out
+
+
+_KO_DIGITS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+
+
+def _korean_number(n):
+    if n == 0:
+        return "영"
+    out = ""
+    for unit_value, unit in ((10 ** 12, "조"), (10 ** 8, "억"), (10 ** 4, "만"), (1, "")):
+        part, n = divmod(n, unit_value)
+        if not part:
+            continue
+        text = ""
+        for value, name in ((1000, "천"), (100, "백"), (10, "십")):
+            digit, part = divmod(part, value)
+            if digit:
+                text += ("" if digit == 1 else _KO_DIGITS[digit]) + name
+        text += _KO_DIGITS[part]
+        out += text + unit
+    return out
+
+
+_EN_ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+            "fifteen sixteen seventeen eighteen nineteen").split()
+_EN_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+def _english_number(n):
+    if n < 20:
+        return _EN_ONES[n]
+    if n < 100:
+        return _EN_TENS[n // 10] + ("-" + _EN_ONES[n % 10] if n % 10 else "")
+    if n < 1000:
+        return _EN_ONES[n // 100] + " hundred" + (" " + _english_number(n % 100) if n % 100 else "")
+    for value, name in ((10 ** 9, "billion"), (10 ** 6, "million"), (1000, "thousand")):
+        if n >= value:
+            return (_english_number(n // value) + " " + name
+                    + (" " + _english_number(n % value) if n % value else ""))
+
+
+_EN_ORDINAL = {"one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
+               "nine": "ninth", "twelve": "twelfth"}
+
+
+def _english_ordinal(n):
+    words = _english_number(n)
+    head, sep, last = words.rpartition(" ")
+    last_head, dash, last_word = last.rpartition("-")
+    if last_word in _EN_ORDINAL:
+        last_word = _EN_ORDINAL[last_word]
+    elif last_word.endswith("y"):
+        last_word = last_word[:-1] + "ieth"
+    else:
+        last_word += "th"
+    return head + sep + last_head + dash + last_word
+
+
+def _english_fraction(num, den):
+    if den == 2:
+        word = "half" if num == 1 else "halves"
+    elif den == 4:
+        word = "quarter" if num == 1 else "quarters"
+    else:
+        word = _english_ordinal(den) + ("" if num == 1 else "s")
+        if den >= 100 and word.startswith("one "):
+            word = word[4:]                     # hundredth, thousandth: no "one"
+        word = word.replace(" ", "-") if den > 20 and den % 100 != 0 and " " in word and den < 100 else word
+    return f"{_english_number(num)} {word}"
+
+
+def read_fractions(text, lang, skip=(), written=None):
+    """Write each fraction a/b out as the language reads it, except those in skip; what was
+    written is added to the list written, if given."""
+    code = lang_suffix(lang).lstrip("_")
+
+    def say(m):
+        out = _say_fraction(m)
+        if written is not None and out != m.group(0):
+            written.append(out)
+        return out
+
+    def _say_fraction(m):
+        if m.group(0) in skip:
+            return m.group(0)
+        num, den = int(m.group(1)), int(m.group(2))
+        if den == 0:
+            return m.group(0)
+        if code == "ja":
+            return f"{_kanji_number(den)}分の{_kanji_number(num)}"
+        if code.startswith("zh"):
+            return f"{_kanji_number(den, chinese=True)}分之{_kanji_number(num, chinese=True)}"
+        if code == "ko":
+            return f"{_korean_number(den)}분의 {_korean_number(num)}"
+        if code == "en":
+            return _english_fraction(num, den)
+        return m.group(0)
+    return _FRACTION_RE.sub(say, text)
+
+
 def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=None):
     """The text sent to the TTS engine. For Japanese with Qwen3-TTS (reading_assist: the
     characters; None: not applied), the words with those characters are first written as
@@ -1197,9 +1334,17 @@ def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=Non
     kanji numerals, after the unit readings, which need the digits."""
     japanese = reading_assist is not None and lang_suffix(lang).lstrip("_") == "ja"
     text = normalize_lookalikes(unicodedata.normalize("NFC", text))
+    # fractions first, before the reading assist could take their numbers apart; a fraction
+    # written in the dictionary is left to it
+    fractions = []
+    text = read_fractions(text, lang, skip={normalize_lookalikes(unicodedata.normalize("NFC", t))
+                                            for t, r, k in dictionaries or [] if r and k != "unit"},
+                          written=fractions)
     if japanese:
+        # the reading assist leaves the dictionary terms, and the fractions just written out
+        # (分 of 二千分の一 would otherwise be taken for minutes)
         terms = [normalize_lookalikes(unicodedata.normalize("NFC", t)) for t, r, _ in dictionaries or [] if r]
-        text = ja_assist_words(text, reading_assist, protect=terms)
+        text = ja_assist_words(text, reading_assist, protect=terms + fractions)
     spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map)
     if japanese:
         spoken = ja_numbers_kanji(spoken)                # the digits left (unit readings)
@@ -1602,7 +1747,7 @@ def step_generate_audio(
             continue
 
         with open(txt_p, "r", encoding="utf-8") as f:
-            spoken_text = apply_dictionary(f.read().strip(), dictionaries, lang, letter_map=letter_map)
+            spoken_text = spoken_text_of(f.read().strip(), dictionaries, lang, letter_map=letter_map)
         if not spoken_text:
             continue
 

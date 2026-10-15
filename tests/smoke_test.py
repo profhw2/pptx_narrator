@@ -1232,4 +1232,26 @@ ok(all(k == pn.DIFF_DIGITS for k, *_ in pn.classify_differences(_a2, _b2, "ニ�
    "a number the recognizer wrote in digits, the same as the note's, is put down to the recognizer; "
    "long vowels and ヲ are written alike before comparing")
 
+
+# fractions are read the way the language reads them; other a/b forms are left as written
+ok(pn.read_fractions("で1/2000ほど、1/2の確率、3/4、1/10。", "ja") == "で二千分の一ほど、二分の一の確率、四分の三、十分の一。"
+   and pn.read_fractions("1/2, 3/4, 1/3, 3/8, 21/100, 1/1000", "en")
+   == "one half, three quarters, one third, three eighths, twenty-one hundredths, one thousandth"
+   and pn.read_fractions("1/2和3/4", "zh") == "二分之一和四分之三"
+   and pn.read_fractions("1/2, 1/2000", "ko") == "이분의 일, 이천분의 일"
+   and pn.read_fractions("1/2", "de") == "1/2",
+   "fractions are read denominator first in Japanese, Chinese and Korean, as ordinals in English")
+ok(pn.read_fractions("5 mg/mL, 10/15/2026, 0.5/2, 1/2.5, A1/2", "ja") == "5 mg/mL, 10/15/2026, 0.5/2, 1/2.5, A1/2",
+   "units, dates with two slashes, decimals and Latin-script tokens are not taken for fractions")
+d_f = [("1/2000", "ニセンブンのイチ", "")]
+_stand_in = sys.modules.pop("pyopenjtalk", None)     # the real module for the reading assist
+ok(pn.spoken_text_of("1/2000ほどで1/2と3/4。", d_f, "ja", reading_assist=pn.READING_ASSIST_CHARS)
+   == "ニセンブンのイチほどで二分の一と四分の三。"
+   and pn.spoken_text_of("1/2000ほどで1/2と3/4。", [], "ja", reading_assist=pn.READING_ASSIST_CHARS)
+   == "二千分の一ほどで二分の一と四分の三。",
+   "a fraction in the dictionary is left to it (nothing of its number added after it), the others are "
+   "written out and left alone by the reading assist")
+if _stand_in is not None:
+    sys.modules["pyopenjtalk"] = _stand_in
+
 print("ALL TESTS PASSED")
