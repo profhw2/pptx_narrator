@@ -1229,6 +1229,37 @@ def _kanji_number(n, chinese=False):
     return out
 
 
+# Japanese numbers in katakana, in their customary reading, so that a digit with two readings
+# (四 し/よん, 七 しち/なな, 九 く/きゅう) cannot be read the other way
+_JA_DIGITS = ["", "イチ", "ニ", "サン", "ヨン", "ゴ", "ロク", "ナナ", "ハチ", "キュウ"]
+_JA_HUNDREDS = {1: "ヒャク", 3: "サンビャク", 6: "ロッピャク", 8: "ハッピャク"}
+_JA_THOUSANDS = {1: "セン", 3: "サンゼン", 8: "ハッセン"}
+
+
+def _katakana_number(n):
+    """An integer read aloud in Japanese, in katakana (4 ヨン, 300 サンビャク, 2000 ニセン)."""
+    if n == 0:
+        return "ゼロ"
+    out = ""
+    for unit_value, unit in ((10 ** 12, "チョウ"), (10 ** 8, "オク"), (10 ** 4, "マン"), (1, "")):
+        part, n = divmod(n, unit_value)
+        if not part:
+            continue
+        text = ""
+        thousands, part = divmod(part, 1000)
+        if thousands:
+            text += _JA_THOUSANDS.get(thousands, _JA_DIGITS[thousands] + "セン")
+        hundreds, part = divmod(part, 100)
+        if hundreds:
+            text += _JA_HUNDREDS.get(hundreds, _JA_DIGITS[hundreds] + "ヒャク")
+        tens, part = divmod(part, 10)
+        if tens:
+            text += ("" if tens == 1 else _JA_DIGITS[tens]) + "ジュウ"
+        text += _JA_DIGITS[part]
+        out += text + unit
+    return out
+
+
 _KO_DIGITS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
 
 
@@ -1316,7 +1347,8 @@ def read_fractions(text, lang, skip=(), written=None):
         if den == 0:
             return m.group(0)
         if code == "ja":
-            return f"{_kanji_number(den)}分の{_kanji_number(num)}"
+            # in katakana, in the customary reading (3/4 ヨンブンのサン, not しぶんのさん)
+            return f"{_katakana_number(den)}ブンの{_katakana_number(num)}"
         if code.startswith("zh"):
             return f"{_kanji_number(den, chinese=True)}分之{_kanji_number(num, chinese=True)}"
         if code == "ko":
