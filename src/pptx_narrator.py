@@ -1179,7 +1179,7 @@ _AFTER_WORD = "エックス"        # a noun put before Japanese that follows a 
 _JA_WORD_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\u3005\u3006\u30fc]+")
 
 
-_LONE_DIGITS_RE = re.compile(r"(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9])")
+_LONE_DIGITS_RE = re.compile(r"(?<![A-Za-z0-9\-.,])[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?(?![A-Za-z0-9])(?![.,][0-9])")
 
 
 def ja_numbers_kanji(text):
@@ -1258,6 +1258,34 @@ def _katakana_number(n):
         text += _JA_DIGITS[part]
         out += text + unit
     return out
+
+
+# Japanese decimals, in katakana in the customary reading: レイ for every 0 (0.001
+# レイテンレイレイイチ, 0.10 レイテンイチレイ), the digits after the point one by one, and the
+# sound changes before
+# テン (1.5 イッテンゴ, 8.5 ハッテンゴ, 10.5 ジュッテンゴ). A number before a unit symbol is
+# written out after the unit reading, which needs the digits.
+_JA_DECIMAL_RE = re.compile(r"(?<![A-Za-z0-9_.,])([0-9]+)\.([0-9]+)(?![A-Za-z0-9_]|\.[0-9])")
+_JA_DECIMAL_BEFORE_UNIT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.,])([0-9]+)\.([0-9]+)(?![A-Za-z0-9_]|\.[0-9])(?!\s*[A-Za-z\u00b5\u03bc%\u00b0\u212b\u2103])")
+_JA_FRACTION_DIGITS = ["レイ", "イチ", "ニ", "サン", "ヨン", "ゴ", "ロク", "ナナ", "ハチ", "キュウ"]
+
+
+def _ja_decimal(whole, fraction):
+    n = int(whole)
+    said = "レイ" if n == 0 else _katakana_number(n)
+    for plain, changed in (("イチ", "イッ"), ("ハチ", "ハッ"), ("ジュウ", "ジュッ")):
+        if said.endswith(plain):
+            said = said[:-len(plain)] + changed
+            break
+    return said + "テン" + "".join(_JA_FRACTION_DIGITS[int(d)] for d in fraction)
+
+
+def ja_decimals(text, before_units=True):
+    """Write the decimals of Japanese text in katakana (see above); with before_units False,
+    those followed by a unit symbol are left for the unit reading first."""
+    pattern = _JA_DECIMAL_RE if before_units else _JA_DECIMAL_BEFORE_UNIT_RE
+    return pattern.sub(lambda m: _ja_decimal(m.group(1), m.group(2)), text)
 
 
 _KO_DIGITS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
@@ -1372,12 +1400,18 @@ def spoken_text_of(text, dictionaries, lang, letter_map=None, reading_assist=Non
     text = read_fractions(text, lang, skip={normalize_lookalikes(unicodedata.normalize("NFC", t))
                                             for t, r, k in dictionaries or [] if r and k != "unit"},
                           written=fractions)
+    is_ja = lang_suffix(lang).lstrip("_") == "ja"
+    if is_ja:
+        # decimals not before a unit symbol, before the reading assist could take them apart
+        text = ja_decimals(text, before_units=False)
     if japanese:
         # the reading assist leaves the dictionary terms, and the fractions just written out
         # (分 of 二千分の一 would otherwise be taken for minutes)
         terms = [normalize_lookalikes(unicodedata.normalize("NFC", t)) for t, r, _ in dictionaries or [] if r]
         text = ja_assist_words(text, reading_assist, protect=terms + fractions)
     spoken = apply_dictionary(text, dictionaries, lang, letter_map=letter_map)
+    if is_ja:
+        spoken = ja_decimals(spoken)                     # the decimals before units, now read
     if japanese:
         spoken = ja_numbers_kanji(spoken)                # the digits left (unit readings)
     return spoken

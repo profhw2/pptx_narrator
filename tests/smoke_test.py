@@ -1155,8 +1155,8 @@ if _pjt:
        "Latin-script word is read as after a noun (上 as the suffix じょう)")
     ok(pn.spoken_text_of("ＤＮＡの", [("DNA", "ディーエヌエー", "")], "ja", reading_assist=None) == "ディーエヌエーの",
        "a dictionary term matches text written in full-width letters")
-    ok(ra_("2026年") == "二千二十六年" and ra_("七割の") == "七割の" and ra_("3.5 mLを") == "三点五ミリリットルを"
-       and ra_("1,000 mLと3.5倍") == "千ミリリットルと三点五倍" and ra_("2週間毎に") == "二週間ゴトに",
+    ok(ra_("2026年") == "二千二十六年" and ra_("七割の") == "七割の" and ra_("3.5 mLを") == "サンテンゴミリリットルを"
+       and ra_("1,000 mLと3.5倍") == "千ミリリットルとサンテンゴ倍" and ra_("2週間毎に") == "二週間ゴトに",
        "a number read as written stays in kanji numerals (the model reads them naturally); numbers before "
        "units keep their digits for the unit readings")
     ok(_KATA_ONLY.fullmatch(pn.ja_numbers_kanji("ニセンニジューロクネン")) is not None,
@@ -1256,5 +1256,17 @@ ok(pn.spoken_text_of("1/2000ほどで1/2と3/4。", d_f, "ja", reading_assist=pn
    "written out and left alone by the reading assist")
 if _stand_in is not None:
     sys.modules["pyopenjtalk"] = _stand_in
+
+# Japanese decimals in katakana, in the customary reading, with or without the reading assist
+_stand_in2 = sys.modules.pop("pyopenjtalk", None)
+for _ra in (pn.READING_ASSIST_CHARS, None):
+    ok(pn.spoken_text_of("0.2%と2.53%、0.001と0.10と2.05、1.5倍と10.5、3.14、2.5 kb。", [], "ja", reading_assist=_ra)
+       == "レイテンニパーセントとニテンゴサンパーセント、レイテンレイレイイチとレイテンイチレイとニテンレイゴ、"
+          "イッテンゴ倍とジュッテンゴ、サンテンイチヨン、ニテンゴキロベース。"
+       and "1.2.3" in pn.spoken_text_of("version 1.2.3 です", [], "ja", reading_assist=_ra),
+       "decimals are read with レイ for every 0 ("
+       + ("assist" if _ra else "plain") + ")")
+if _stand_in2 is not None:
+    sys.modules["pyopenjtalk"] = _stand_in2
 
 print("ALL TESTS PASSED")
